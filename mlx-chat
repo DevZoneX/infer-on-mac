@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
+  exec "$PROJECT_DIR/.venv/bin/python" -m mlx_chat "$@"
+fi
+
+if command -v uv >/dev/null 2>&1; then
+  exec uv run --project "$PROJECT_DIR" python -m mlx_chat "$@"
+fi
+
+echo "mlx-chat needs its local environment. Run: ./setup.sh" >&2
+exit 1

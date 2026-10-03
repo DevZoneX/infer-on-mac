@@ -1,0 +1,31 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: macos-14
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        voice: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11'
+      - name: Install text-only dependencies
+        if: ${{ !matrix.voice }}
+        run: uv sync --locked --extra dev
+      - name: Install with audio dependencies
+        if: ${{ matrix.voice }}
+        run: uv sync --locked --extra dev --extra voice
+      - run: uv run --no-sync ruff check src tests
+      - run: uv run --no-sync ruff format --check src tests
+      - run: uv run --no-sync pytest
+      - run: uv build

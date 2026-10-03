@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mlx-chat-terminal"
+version = "0.1.0"
+description = "A polished local MLX-LM server and terminal chat experience for macOS"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "infer-on-macos contributors" }]
+dependencies = [
+  "ddgs>=9.16,<10",
+  "mlx-lm>=0.32.0,<0.33",
+  "prompt-toolkit>=3.0.52,<4",
+  "rich>=14.1,<15",
+]
+
+[project.optional-dependencies]
+voice = [
+  "kokoro-mlx[audio]>=0.1.2,<0.2",
+  "mlx-whisper>=0.4",
+  "numpy>=1.26",
+  "sounddevice>=0.5",
+  "soundfile>=0.12",
+]
+dev = [
+  "pytest>=8.4,<9",
+  "ruff>=0.13,<0.14",
+]
+
+[project.scripts]
+mlx-chat = "mlx_chat.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlx_chat"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
