@@ -42,6 +42,15 @@ from .voice import (
 )
 from .web import WebSearcher
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant running locally on an Apple Silicon MacBook with macOS. "
+    "Give clear, direct answers. Tailor commands, paths, shortcuts, and setup instructions "
+    "to macOS and its default zsh shell unless the user asks for another platform. "
+    "Use fenced Markdown code blocks with a language label for code and commands. "
+    "Be honest about uncertainty and never claim to have run commands or accessed files "
+    "unless you actually have."
+)
+
 CONCISE_SYSTEM_PROMPT = (
     "Answer directly and briefly. Prefer the minimum explanation needed to be useful; "
     "do not reveal chain-of-thought."
@@ -102,8 +111,9 @@ class ChatApp:
 
     def api_messages(self) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
-        if self.settings.system_prompt:
-            messages.append({"role": "system", "content": self.settings.system_prompt})
+        messages.append(
+            {"role": "system", "content": self.settings.system_prompt or DEFAULT_SYSTEM_PROMPT}
+        )
         if self.settings.concise:
             messages.append({"role": "system", "content": CONCISE_SYSTEM_PROMPT})
         for item in self.transcript:
@@ -336,7 +346,9 @@ class ChatApp:
         if len(args) > 1 or (args and not args[0].isdigit()):
             raise MlxChatError("Usage: /voice [SECONDS]")
         seconds = 30 if not args else int(args[0])
-        self.ui.info(f"Listening for up to {seconds} seconds; press Ctrl-C to stop and transcribe.")
+        self.ui.info(
+            f"Listening for up to {seconds} seconds; press F2 (or Ctrl-C) to stop and transcribe."
+        )
         with self.ui.console.status(Text("Listening…", style="red")):
             prompt = transcribe_microphone(seconds=seconds, model=DEFAULT_TRANSCRIPTION_MODEL)
         self.ui.success(f"Heard: {prompt}")
@@ -360,12 +372,15 @@ class ChatApp:
         else:
             text = self.last_result.answer
         try:
-            with self.ui.console.status(Text("Preparing local speech…", style="cyan")):
-                speak(text)
+            with self.ui.console.status(Text("Speaking… press F4 to stop", style="cyan")):
+                stopped = speak(text)
         except KeyboardInterrupt:
             self.ui.warning("Speech stopped.")
             return
-        self.ui.success("Speech finished.")
+        if stopped:
+            self.ui.warning("Speech stopped.")
+        else:
+            self.ui.success("Speech finished.")
 
     def _cmd_web(self, args: list[str]) -> None:
         if not args:
@@ -412,16 +427,15 @@ class ChatApp:
 
     def _cmd_system(self, args: list[str]) -> None:
         if not args:
-            if self.settings.system_prompt:
-                self.ui.console.print(
-                    Panel(
-                        Text(self.settings.system_prompt),
-                        title="System prompt",
-                        border_style="magenta",
-                    )
+            self.ui.console.print(
+                Panel(
+                    Text(self.settings.system_prompt or DEFAULT_SYSTEM_PROMPT),
+                    title="System prompt"
+                    if self.settings.system_prompt
+                    else "System prompt (default)",
+                    border_style="magenta",
                 )
-            else:
-                self.ui.info("No system prompt is set.")
+            )
             return
         value = " ".join(args)
         if value.lower() == "clear":
@@ -431,7 +445,9 @@ class ChatApp:
             value = path.read_text(encoding="utf-8")
         self.settings.system_prompt = value
         self._autosave()
-        self.ui.success("System prompt updated." if value else "System prompt cleared.")
+        self.ui.success(
+            "System prompt updated." if value else "Default MacBook system prompt restored."
+        )
 
     def _cmd_retry(self) -> None:
         removed_assistant = None
@@ -476,7 +492,7 @@ class ChatApp:
             ("min_p", f"{self.settings.min_p:g}"),
             ("max_tokens", str(self.settings.max_tokens)),
             ("repetition_penalty", f"{self.settings.repetition_penalty:g}"),
-            ("system_prompt", self.settings.system_prompt or "(none)"),
+            ("system_prompt", self.settings.system_prompt or DEFAULT_SYSTEM_PROMPT),
             ("web_results", str(self.settings.web_results)),
             ("web_region", self.settings.web_region),
             ("web_safesearch", self.settings.web_safesearch),

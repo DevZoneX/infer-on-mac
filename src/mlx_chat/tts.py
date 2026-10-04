@@ -7,7 +7,10 @@ import threading
 import unicodedata
 import warnings
 
+from prompt_toolkit.keys import Keys
+
 from .errors import MlxChatError
+from .keyboard import stop_key_listener
 
 DEFAULT_TTS_MODEL = "mlx-community/Kokoro-82M-bf16"
 DEFAULT_TTS_VOICE = "af_heart"
@@ -48,8 +51,8 @@ def _load_engine() -> object:
         return _engine
 
 
-def speak(text: str) -> None:
-    """Load one English voice on demand and let Kokoro handle playback."""
+def speak(text: str) -> bool:
+    """Speak locally; return True if F4 or Ctrl-C stopped playback."""
     text = speech_text(text)
     if not text or not any(char.isalnum() for char in text):
         raise MlxChatError("There is no text to speak.")
@@ -63,7 +66,11 @@ def speak(text: str) -> None:
                 category=FutureWarning,
                 module=r"torch\.jit\._script",
             )
-            _load_engine().speak(text, voice=DEFAULT_TTS_VOICE, stream=True)
+            with stop_key_listener(Keys.F4) as stopped:
+                engine = _load_engine()
+                if not stopped.is_set():
+                    engine.speak(text, voice=DEFAULT_TTS_VOICE, stream=True, stop_event=stopped)
+                return stopped.is_set()
     except ImportError as exc:
         raise MlxChatError(
             "Speech output is not installed. Run `uv sync --extra dev --extra voice`."

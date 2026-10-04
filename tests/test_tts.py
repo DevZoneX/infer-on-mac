@@ -1,5 +1,5 @@
 import warnings
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -23,7 +23,7 @@ def test_speak_uses_only_english_kokoro(monkeypatch):
     engine = Mock()
     monkeypatch.setattr(tts, "_load_engine", lambda: engine)
     tts.speak("**Hello** 👋")
-    engine.speak.assert_called_once_with("Hello", voice="af_heart", stream=True)
+    engine.speak.assert_called_once_with("Hello", voice="af_heart", stream=True, stop_event=ANY)
 
 
 def test_empty_text_does_not_load_model(monkeypatch):
@@ -87,3 +87,43 @@ def test_only_known_torch_warning_is_hidden_and_filter_is_restored(monkeypatch):
         "Unrelated speech warning",
         "Another torch warning",
     ]
+
+
+def test_f4_stops_active_speech_through_playback_event(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+
+    from mlx_chat import keyboard
+
+    engine = Mock()
+    observed = []
+
+    def play(text, **options):
+        stopped = options["stop_event"]
+        observed.append(stopped.wait(1))
+
+    engine.speak.side_effect = play
+    monkeypatch.setattr(tts, "_load_engine", lambda: engine)
+    monkeypatch.setattr(keyboard.sys.stdin, "isatty", lambda: True)
+    with create_pipe_input() as pipe:
+        monkeypatch.setattr(keyboard, "create_input", lambda: pipe)
+        pipe.send_text("\x1bOS")
+        assert tts.speak("Hello") is True
+    # F4 can arrive during loading, in which case playback is skipped entirely.
+    assert observed in ([], [True])
+
+
+def test_stop_listener_handles_f4_encodings_and_restores_input(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.keys import Keys
+
+    from mlx_chat import keyboard
+
+    monkeypatch.setattr(keyboard.sys.stdin, "isatty", lambda: True)
+    for sequence in ("\x1bOS", "\x1b[14~", "\x03"):
+        with create_pipe_input() as pipe:
+            monkeypatch.setattr(keyboard, "create_input", lambda: pipe)
+            with keyboard.stop_key_listener(Keys.F4) as stopped:
+                pipe.send_text("\x1bOR")  # F3 must not stop speech.
+                assert not stopped.wait(0.05)
+                pipe.send_text(sequence)
+                assert stopped.wait(1)

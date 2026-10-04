@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 import time
+from contextlib import ExitStack, closing
 from pathlib import Path
 
+from prompt_toolkit.input import create_input
+from prompt_toolkit.keys import Keys
+
 from .errors import MlxChatError
+from .keyboard import stop_requested
 
 DEFAULT_TRANSCRIPTION_MODEL = "mlx-community/whisper-large-v3-turbo"
 
@@ -29,6 +35,11 @@ def preload_transcription_model(model: str = DEFAULT_TRANSCRIPTION_MODEL) -> Non
     # so ModelHolder can be reused instead of leaving an incompatible fp32
     # model in its cache.
     ModelHolder.get_model(model, mx.float16)
+
+
+def recording_stop_requested(keyboard) -> bool:
+    """Stop recording on F2 or Ctrl-C, without blocking microphone capture."""
+    return stop_requested(keyboard, Keys.F2)
 
 
 def transcribe_microphone(*, seconds: int = 30, model: str = DEFAULT_TRANSCRIPTION_MODEL) -> str:
@@ -60,10 +71,19 @@ def transcribe_microphone(*, seconds: int = 30, model: str = DEFAULT_TRANSCRIPTI
     silent_blocks = 0
     started = time.monotonic()
     try:
-        with sd.InputStream(
-            samplerate=sample_rate, channels=1, dtype="float32", blocksize=block_size
-        ) as stream:
+        with ExitStack() as stack:
+            keyboard = None
+            if sys.stdin.isatty():
+                keyboard = stack.enter_context(closing(create_input()))
+                stack.enter_context(keyboard.raw_mode())
+            stream = stack.enter_context(
+                sd.InputStream(
+                    samplerate=sample_rate, channels=1, dtype="float32", blocksize=block_size
+                )
+            )
             while time.monotonic() - started < seconds:
+                if recording_stop_requested(keyboard):
+                    break
                 block, _overflowed = stream.read(block_size)
                 chunks.append(block.copy())
                 rms = float(np.sqrt(np.mean(np.square(block))))

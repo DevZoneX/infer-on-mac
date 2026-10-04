@@ -55,6 +55,9 @@ For a 48 GB M4 Max, start with the medium preset:
 mlx-chat medium
 ```
 
+The default system prompt tailors answers to an Apple Silicon MacBook, macOS,
+and zsh. Use `/system TEXT` to replace it or `/system clear` to restore the default.
+
 Type a question and press Enter. The first launch can take a while because it
 downloads and loads the model. Later launches reuse the local model server when
 possible.
@@ -113,9 +116,11 @@ brew install ffmpeg
 
 Then, in chat:
 
-1. Press `Ctrl-V` to start voice input and speak normally.
-2. Press `Ctrl-C` to stop and transcribe immediately.
+1. Press `F1` to start voice input and speak normally.
+2. Press `F2` to stop and transcribe immediately (`Ctrl-C` also works).
 3. `/voice` remains available as an alternative to the shortcut.
+
+On MacBooks where function keys control hardware, hold `Fn` when pressing `F1`–`F4`.
 
 Voice uses `mlx-community/whisper-large-v3-turbo`, which loads when chat starts
 so the first voice prompt is ready. Its loading is shown cleanly in the startup
@@ -124,9 +129,9 @@ permission. Audio and transcription stay on the Mac.
 
 ## Hear model answers
 
-Use `/speak` or `F6` to read the latest answer in English with local
+Use `/speak` or `F3` to read the latest answer in English with local
 `mlx-community/Kokoro-82M-bf16` and its `af_heart` voice. The model loads on
-first use and is reused afterward. Press `Ctrl-C` to stop playback.
+first use and is reused afterward. Press `F4` (or `Ctrl-C`) to stop playback.
 Emoji, model tokens, Markdown formatting, URLs, and fenced code are omitted.
 Only one English speech model is used. FFmpeg is needed for microphone
 transcription, not speech output. On first use, Kokoro may also download its
@@ -145,9 +150,10 @@ English phonemizer data; synthesis stays local afterward.
 | A fast, brief answer | `/concise on` |
 | More deliberate reasoning | `/think on` |
 | Change model | `/model small`, `/model medium`, or `/model large` |
-| Start voice input | `Ctrl-V` or `/voice` |
-| Stop voice input | `Ctrl-C` |
-| Read the latest answer aloud | `F6` or `/speak` |
+| Start voice input | `F1` or `/voice` |
+| Stop voice input | `F2` or `Ctrl-C` |
+| Read the latest answer aloud | `F3` or `/speak` |
+| Stop speaking | `F4` or `Ctrl-C` |
 | Retry the last answer | `/retry` |
 | Remove the latest turn | `/undo` |
 | Start fresh | `/new` or `/reset` |

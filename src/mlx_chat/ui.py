@@ -101,11 +101,11 @@ class TerminalUI:
         def _clear(event) -> None:  # type: ignore[no-untyped-def]
             event.app.renderer.clear()
 
-        @bindings.add("c-v")
+        @bindings.add("f1")
         def _voice(event) -> None:  # type: ignore[no-untyped-def]
             event.app.exit(result="/voice")
 
-        @bindings.add("f6")
+        @bindings.add("f3")
         def _speak(event) -> None:  # type: ignore[no-untyped-def]
             event.app.exit(result="/speak")
 
@@ -546,7 +546,8 @@ class TerminalUI:
         )
         self.console.print(
             "[dim]Tip: start a message with // to send a literal /. "
-            "Esc+Enter inserts a newline · Ctrl-V starts voice · F6 speaks the last answer · "
+            "Esc+Enter inserts a newline · F1 listens · F2 stops listening · "
+            "F3 speaks · F4 stops speech · "
             "Ctrl-C stops audio.[/dim]"
         )
 

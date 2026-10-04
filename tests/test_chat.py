@@ -105,6 +105,7 @@ def test_api_messages_uses_private_model_context_but_keeps_display_content():
     ]
 
     assert app.api_messages() == [
+        {"role": "system", "content": chat.DEFAULT_SYSTEM_PROMPT},
         {"role": "user", "content": "enriched context"},
         {"role": "assistant", "content": "answer"},
     ]
@@ -148,3 +149,22 @@ def test_web_command_requires_a_query():
 
     with pytest.raises(MlxChatError, match="Usage: /web QUERY"):
         app._cmd_web([])
+
+
+def test_custom_system_prompt_overrides_default():
+    app = bare_app()
+    app.settings.system_prompt = "Custom instructions"
+    assert app.api_messages()[0] == {"role": "system", "content": "Custom instructions"}
+
+
+def test_system_command_shows_effective_default():
+    import io
+
+    from rich.console import Console
+
+    app = bare_app()
+    output = io.StringIO()
+    app.ui = SimpleNamespace(console=Console(file=output, width=100))
+    app._cmd_system([])
+    assert "System prompt (default)" in output.getvalue()
+    assert "Apple Silicon MacBook" in output.getvalue()

@@ -146,3 +146,27 @@ def test_live_renderer_is_cleared_when_generation_is_interrupted(monkeypatch):
 )
 def test_short_model(model, maximum, expected):
     assert short_model(model, maximum) == expected
+
+
+def test_f1_starts_voice_and_f3_speaks(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from mlx_chat.config import Settings
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        commands = []
+        event = SimpleNamespace(
+            app=SimpleNamespace(exit=lambda **kw: commands.append(kw["result"]))
+        )
+        bindings = ui.prompt_session.key_bindings
+        bindings.get_bindings_for_keys(("f1",))[0].handler(event)
+        bindings.get_bindings_for_keys(("f3",))[0].handler(event)
+        assert commands == ["/voice", "/speak"]
+        assert not bindings.get_bindings_for_keys(("f6",))
+        assert not bindings.get_bindings_for_keys(("c-v",))
