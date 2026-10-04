@@ -69,6 +69,8 @@ When you are done and want to release model memory:
 ```
 
 `/exit` leaves the server running; `/stop` shuts it down and releases memory.
+At the input prompt, `Fn+Esc` (or plain `Esc`) runs `/stop`. Terminals do not
+provide a separate Fn modifier for Escape. `Esc+Enter` still inserts a newline.
 
 ## Choose a model
 
@@ -159,7 +161,7 @@ English phonemizer data; synthesis stays local afterward.
 | Start fresh | `/new` or `/reset` |
 | Save / load a conversation | `/save NAME` / `/load NAME` |
 | Show server and model details | `/status` |
-| Shut down and free memory | `/stop` |
+| Shut down and free memory | `Fn+Esc` / `Esc` or `/stop` |
 
 Useful keys: `Tab` completes commands, `Esc`+`Enter` inserts a newline,
 `Ctrl-L` clears the display, and `Ctrl-D` exits while leaving the server running.

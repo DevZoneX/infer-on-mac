@@ -170,3 +170,79 @@ def test_f1_starts_voice_and_f3_speaks(monkeypatch, tmp_path):
         assert commands == ["/voice", "/speak"]
         assert not bindings.get_bindings_for_keys(("f6",))
         assert not bindings.get_bindings_for_keys(("c-v",))
+
+
+def test_user_prompt_commits_text_once_and_audio_commands_use_inline_status(monkeypatch, tmp_path):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from mlx_chat.config import Settings
+
+    output = io.StringIO()
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "mlx_chat.ui.Console",
+        lambda **_: Console(file=output, force_terminal=True, color_system=None),
+    )
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        pipe.send_text("Hello there\n")
+        assert ui.prompt() == "Hello there"
+        assert output.getvalue().count("Hello there") == 1
+        assert "● You" in output.getvalue()
+        assert "╭" in output.getvalue()
+        assert "╰" in output.getvalue()
+        pipe.send_text("/voice\n")
+        assert ui.prompt() == "/voice"
+        pipe.send_text("/speak\n")
+        assert ui.prompt() == "/speak"
+        assert "/voice" not in output.getvalue()
+        assert "/speak" not in output.getvalue()
+
+
+def test_user_boxes_use_full_width_and_grow_vertically():
+    ui = object.__new__(TerminalUI)
+    ui.console = Console(file=io.StringIO(), width=50, color_system=None)
+    heights = []
+    for value in ("hello", "x" * 100, "one\ntwo\nthree"):
+        lines = ui.console.render_lines(ui.user_line(value), ui.console.options)
+        assert all(sum(len(segment.text) for segment in line) == 50 for line in lines)
+        heights.append(len(lines))
+    assert heights[0] == 3
+    assert heights[1] > heights[0]
+    assert heights[2] == 5
+    live = ui.audio_status("Listening… F2 to finish")
+    ui.console.print(live.renderable)
+    rows = ui.console.file.getvalue().splitlines()
+    spinner_row = next(row for row in rows if "Listening" in row)
+    assert spinner_row.startswith("│")
+    assert spinner_row.endswith("│")
+    assert rows[0].startswith("╭")
+    assert rows[-1].startswith("╰")
+
+
+def test_escape_stops_server_and_escape_enter_still_inserts_newline(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from mlx_chat.config import Settings
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        results = []
+        inserted = []
+        event = SimpleNamespace(
+            app=SimpleNamespace(exit=lambda **kw: results.append(kw["result"])),
+            current_buffer=SimpleNamespace(insert_text=inserted.append),
+        )
+        bindings = ui.prompt_session.key_bindings
+        bindings.get_bindings_for_keys(("escape",))[0].handler(event)
+        assert results == ["/stop"]
+        bindings.get_bindings_for_keys(("escape", "c-m"))[0].handler(event)
+        assert inserted == ["\n"]
+        assert results == ["/stop"]

@@ -168,3 +168,22 @@ def test_system_command_shows_effective_default():
     app._cmd_system([])
     assert "System prompt (default)" in output.getvalue()
     assert "Apple Silicon MacBook" in output.getvalue()
+
+
+def test_voice_transcription_is_rendered_as_user_input(monkeypatch):
+    from contextlib import nullcontext
+
+    app = bare_app()
+    statuses = []
+    user_messages = []
+    generations = []
+    app.ui = SimpleNamespace(
+        audio_status=lambda text: statuses.append(text) or nullcontext(),
+        user_message=user_messages.append,
+    )
+    monkeypatch.setattr(chat, "transcribe_microphone", lambda **kw: "My spoken question")
+    app._generate = lambda text, **kw: generations.append(text)
+    app._cmd_voice([])
+    assert statuses == ["Listening… F2 to finish · up to 30s"]
+    assert user_messages == ["My spoken question"]
+    assert generations == ["My spoken question"]

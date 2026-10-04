@@ -346,12 +346,9 @@ class ChatApp:
         if len(args) > 1 or (args and not args[0].isdigit()):
             raise MlxChatError("Usage: /voice [SECONDS]")
         seconds = 30 if not args else int(args[0])
-        self.ui.info(
-            f"Listening for up to {seconds} seconds; press F2 (or Ctrl-C) to stop and transcribe."
-        )
-        with self.ui.console.status(Text("Listening…", style="red")):
+        with self.ui.audio_status(f"Listening… F2 to finish · up to {seconds}s"):
             prompt = transcribe_microphone(seconds=seconds, model=DEFAULT_TRANSCRIPTION_MODEL)
-        self.ui.success(f"Heard: {prompt}")
+        self.ui.user_message(prompt)
         self._generate(
             prompt,
             metadata={"input": "voice", "transcription_model": DEFAULT_TRANSCRIPTION_MODEL},
@@ -372,15 +369,15 @@ class ChatApp:
         else:
             text = self.last_result.answer
         try:
-            with self.ui.console.status(Text("Speaking… press F4 to stop", style="cyan")):
+            with self.ui.audio_status("Speaking… F4 to stop"):
                 stopped = speak(text)
         except KeyboardInterrupt:
-            self.ui.warning("Speech stopped.")
+            self.ui.user_message("Speech stopped.")
             return
         if stopped:
-            self.ui.warning("Speech stopped.")
+            self.ui.user_message("Speech stopped.")
         else:
-            self.ui.success("Speech finished.")
+            self.ui.user_message("Speech finished.")
 
     def _cmd_web(self, args: list[str]) -> None:
         if not args:

@@ -11,13 +11,18 @@ from html import escape as html_escape
 
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.completion import FuzzyWordCompleter
+from prompt_toolkit.filters import to_filter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, VSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style as PromptStyle
 from rich import box
 from rich.console import Console, Group
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -87,6 +92,7 @@ class TerminalUI:
     def __init__(self, settings: Settings, *, plain: bool = False):
         force_terminal = None if not plain else False
         self.console = Console(force_terminal=force_terminal, no_color=plain)
+        self._interactive_prompt = self.console.is_terminal and not plain
         self.settings = settings
         self._session_name: str | None = None
         self._message_count = 0
@@ -96,6 +102,10 @@ class TerminalUI:
         @bindings.add("escape", "enter")
         def _newline(event) -> None:  # type: ignore[no-untyped-def]
             event.current_buffer.insert_text("\n")
+
+        @bindings.add("escape")
+        def _stop(event) -> None:  # type: ignore[no-untyped-def]
+            event.app.exit(result="/stop")
 
         @bindings.add("c-l")
         def _clear(event) -> None:  # type: ignore[no-untyped-def]
@@ -113,7 +123,8 @@ class TerminalUI:
             {}
             if plain
             else {
-                "prompt": "bold #5fd7ff",
+                "user-border": "#87d787",
+                "user-title": "bold #87d787",
                 "bottom-toolbar": "bg:#262b36 #aab2c0",
                 "completion-menu.completion": "bg:#262b36 #d7dce5",
                 "completion-menu.completion.current": "bg:#5f5fff #ffffff bold",
@@ -128,6 +139,40 @@ class TerminalUI:
             multiline=False,
             enable_open_in_editor=True,
             mouse_support=False,
+            erase_when_done=self._interactive_prompt,
+        )
+
+        # Frame only the editable input; keep the status toolbar outside it.
+        root = self.prompt_session.layout.container
+        self.prompt_session.layout.current_window.dont_extend_height = to_filter(True)
+
+        def edge(char, width=None):
+            return Window(char=char, width=width, height=1, style="class:user-border")
+
+        root.children[0] = HSplit(
+            [
+                VSplit(
+                    [
+                        Window(
+                            FormattedTextControl([("class:user-title", "╭─ ● You ")]),
+                            width=9,
+                            height=1,
+                        ),
+                        edge("─"),
+                        edge("╮", 1),
+                    ]
+                ),
+                VSplit(
+                    [
+                        Window(char="│", width=1, style="class:user-border"),
+                        Window(width=1),
+                        root.children[0],
+                        Window(width=1),
+                        Window(char="│", width=1, style="class:user-border"),
+                    ]
+                ),
+                VSplit([edge("╰", 1), edge("─"), edge("╯", 1)]),
+            ],
         )
 
     def set_context(self, session_name: str | None, message_count: int) -> None:
@@ -178,7 +223,7 @@ class TerminalUI:
         )
         self.console.print(
             "[dim]Type [bold]/help[/bold] for commands · Esc+Enter adds a line · "
-            "Ctrl-C cancels · Ctrl-D exits[/dim]"
+            "Esc stops the server · Ctrl-C cancels · Ctrl-D exits[/dim]"
         )
 
     def _toolbar(self) -> HTML:
@@ -194,12 +239,39 @@ class TerminalUI:
             f"session: {html_escape(session)}  turns: {self._message_count // 2} "
         )
 
-    def prompt(self) -> str:
-        return self.prompt_session.prompt(
-            HTML("<prompt>you ❯ </prompt>"),
-            bottom_toolbar=self._toolbar,
-            prompt_continuation=lambda width, _line, _wrap: " " * max(0, width - 2) + "· ",
+    def user_line(self, value: str) -> Panel:
+        return Panel(
+            Text(sanitize_terminal_text(value)),
+            title="[bold green]● You[/bold green]",
+            title_align="left",
+            border_style="green",
+            box=box.ROUNDED,
+            padding=(0, 1),
         )
+
+    def audio_status(self, value: str) -> Live:
+        # Put the animation in the panel's content row, between its borders.
+        spinner = Spinner("dots", text=Text(sanitize_terminal_text(value)), style="green")
+        panel = self.user_line(value)
+        panel.renderable = spinner
+        return Live(panel, console=self.console, transient=True, refresh_per_second=10)
+
+    def user_message(self, value: str) -> None:
+        self.console.print(self.user_line(value))
+
+    def prompt(self) -> str:
+        value = self.prompt_session.prompt(
+            "",
+            bottom_toolbar=self._toolbar,
+            prompt_continuation=lambda width, _line, _wrap: " " * width,
+        )
+        # Audio commands replace the input with their status and transcription.
+        # Other input is committed once after the editable prompt is erased.
+        if self._interactive_prompt and value.strip():
+            command = value.split()[0].lower()
+            if command not in {"/voice", "/speak"}:
+                self.user_message(value)
+        return value
 
     def _notice(self, symbol: str, style: str, message: str) -> None:
         text = Text()
