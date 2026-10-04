@@ -8,6 +8,12 @@ your Mac.
 install → mlx-chat medium → type or speak → /stop when finished
 ```
 
+## Demo
+
+[![mlx-chat demo: local chat and voice controls](assets/demo-preview.gif)](assets/demo-muted.mp4)
+
+[Watch the full demo without sound](assets/demo-muted.mp4).
+
 ## What you need
 
 - An Apple Silicon Mac (M1 or newer) running macOS
