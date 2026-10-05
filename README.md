@@ -64,6 +64,11 @@ mlx-chat medium
 The default system prompt tailors answers to an Apple Silicon MacBook, macOS,
 and zsh. Use `/system TEXT` to replace it or `/system clear` to restore the default.
 
+The conversation stays in a scrollable view above the fixed input box.
+Scroll with the mouse wheel or Page Up / Page Down. Scrolling up pauses automatic
+following while an answer streams; return to the bottom or press Ctrl+End to
+follow new text again.
+
 Type a question and press Enter. The first launch can take a while because it
 downloads and loads the model. Later launches reuse the local model server when
 possible.
@@ -125,7 +130,8 @@ brew install ffmpeg
 Then, in chat:
 
 1. Press `F1` to start voice input and speak normally.
-2. Press `F2` to stop and transcribe immediately (`Ctrl-C` also works).
+2. Recording stops automatically after about 1.2 seconds of silence following speech.
+   Press `F2` to finish sooner (`Ctrl-C` also works).
 3. `/voice` remains available as an alternative to the shortcut.
 
 On MacBooks where function keys control hardware, hold `Fn` when pressing `F1`–`F4`.

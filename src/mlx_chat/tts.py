@@ -6,6 +6,7 @@ import re
 import threading
 import unicodedata
 import warnings
+from contextlib import nullcontext
 
 from prompt_toolkit.keys import Keys
 
@@ -39,6 +40,11 @@ def speech_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[*_`~|]", "", text)).strip()
 
 
+def is_ready() -> bool:
+    """Whether the speech model has successfully loaded in this process."""
+    return _engine is not None
+
+
 def _load_engine() -> object:
     global _engine
     with _engine_lock:
@@ -51,7 +57,7 @@ def _load_engine() -> object:
         return _engine
 
 
-def speak(text: str) -> bool:
+def speak(text: str, *, stop_event=None) -> bool:
     """Speak locally; return True if F4 or Ctrl-C stopped playback."""
     text = speech_text(text)
     if not text or not any(char.isalnum() for char in text):
@@ -66,7 +72,9 @@ def speak(text: str) -> bool:
                 category=FutureWarning,
                 module=r"torch\.jit\._script",
             )
-            with stop_key_listener(Keys.F4) as stopped:
+            with (
+                nullcontext(stop_event) if stop_event is not None else stop_key_listener(Keys.F4)
+            ) as stopped:
                 engine = _load_engine()
                 if not stopped.is_set():
                     engine.speak(text, voice=DEFAULT_TTS_VOICE, stream=True, stop_event=stopped)

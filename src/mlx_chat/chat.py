@@ -38,7 +38,8 @@ from .ui import SLASH_COMMANDS, TerminalUI, sanitize_terminal_text, short_model
 from .voice import (
     DEFAULT_TRANSCRIPTION_MODEL,
     preload_transcription_model,
-    transcribe_microphone,
+    record_microphone,
+    transcribe_audio,
 )
 from .web import WebSearcher
 
@@ -124,6 +125,13 @@ class ChatApp:
         return messages
 
     def run(self) -> int:
+        self.ui.enable_conversation()
+        try:
+            return self._run()
+        finally:
+            self.ui.close_conversation()
+
+    def _run(self) -> int:
         self.ui.banner(
             reused=self.start_result.reused,
             managed=self.start_result.managed,
@@ -212,6 +220,15 @@ class ChatApp:
         return True
 
     def _handle_command(self, value: str) -> None:
+        command = value.split()[0].lower() if value.split() else ""
+        popup = getattr(self.ui, "command_popup", None)
+        if popup is not None and command not in {"/voice", "/web", "/retry"}:
+            with popup(command):
+                self._dispatch_command(value)
+        else:
+            self._dispatch_command(value)
+
+    def _dispatch_command(self, value: str) -> None:
         try:
             parts = shlex.split(value)
         except ValueError as exc:
@@ -346,9 +363,16 @@ class ChatApp:
         if len(args) > 1 or (args and not args[0].isdigit()):
             raise MlxChatError("Usage: /voice [SECONDS]")
         seconds = 30 if not args else int(args[0])
-        with self.ui.audio_status(f"Listening… F2 to finish · up to {seconds}s"):
-            prompt = transcribe_microphone(seconds=seconds, model=DEFAULT_TRANSCRIPTION_MODEL)
-        self.ui.user_message(prompt)
+        with self.ui.audio_status(f"/voice Listening… F2 to finish · up to {seconds}s"):
+            audio = self.ui.run_audio(
+                lambda stop_event: record_microphone(seconds=seconds, stop_event=stop_event)
+            )
+        with self.ui.audio_status("/voice Transcribing…"):
+            prompt = self.ui.run_native(
+                lambda: transcribe_audio(audio, model=DEFAULT_TRANSCRIPTION_MODEL)
+            )
+        voice_message = getattr(self.ui, "voice_message", self.ui.user_message)
+        voice_message(prompt)
         self._generate(
             prompt,
             metadata={"input": "voice", "transcription_model": DEFAULT_TRANSCRIPTION_MODEL},
@@ -370,14 +394,16 @@ class ChatApp:
             text = self.last_result.answer
         try:
             with self.ui.audio_status("Speaking… F4 to stop"):
-                stopped = speak(text)
+                stopped = self.ui.run_audio(
+                    lambda stop_event: speak(text, stop_event=stop_event), stop_key="f4"
+                )
         except KeyboardInterrupt:
-            self.ui.user_message("Speech stopped.")
+            self.ui.info("Speech stopped.")
             return
         if stopped:
-            self.ui.user_message("Speech stopped.")
+            self.ui.info("Speech stopped.")
         else:
-            self.ui.user_message("Speech finished.")
+            self.ui.info("Speech finished.")
 
     def _cmd_web(self, args: list[str]) -> None:
         if not args:
@@ -430,7 +456,7 @@ class ChatApp:
                     title="System prompt"
                     if self.settings.system_prompt
                     else "System prompt (default)",
-                    border_style="magenta",
+                    border_style="bright_cyan",
                 )
             )
             return
@@ -496,7 +522,7 @@ class ChatApp:
         ]
         for key, item in values:
             table.add_row(Text(key), Text(str(item)))
-        self.ui.console.print(Panel(table, title="Effective settings", border_style="blue"))
+        self.ui.console.print(Panel(table, title="Effective settings", border_style="bright_cyan"))
 
     def _set_number(
         self,
@@ -539,7 +565,7 @@ class ChatApp:
         for key, value in result.usage.items():
             table.add_row(Text(key.replace("_", " ").title()), Text(str(value)))
         table.add_row(Text("Finish reason"), Text(result.finish_reason or "unknown"))
-        self.ui.console.print(Panel(table, title="Last response", border_style="green"))
+        self.ui.console.print(Panel(table, title="Last response", border_style="bright_cyan"))
 
     def _cmd_status(self) -> None:
         record = self.manager.matching_record()
@@ -556,7 +582,7 @@ class ChatApp:
         table.add_row(Text("Endpoint"), Text(self.settings.base_url))
         table.add_row(Text("Session"), Text(self.session_name or "unsaved"))
         table.add_row(Text("Messages"), Text(str(len(self.transcript))))
-        self.ui.console.print(Panel(table, title="mlx-chat status", border_style="green"))
+        self.ui.console.print(Panel(table, title="mlx-chat status", border_style="bright_cyan"))
 
     def _cmd_model(self, args: list[str]) -> None:
         if not args:
@@ -589,6 +615,9 @@ class ChatApp:
             stop_record(record, grace=grace)
 
     def _restart(self, model: str) -> None:
+        self.ui.run_task(lambda: self._restart_server(model))
+
+    def _restart_server(self, model: str) -> None:
         candidate = self.settings.merged(model=model)
         record = self.manager.matching_record()
         if not record and not self.start_result.managed:
@@ -752,7 +781,7 @@ class ChatApp:
         for name, path in sessions:
             modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
             table.add_row(Text(name), Text(modified), Text(str(path)))
-        self.ui.console.print(Panel(table, title="Saved sessions", border_style="blue"))
+        self.ui.console.print(Panel(table, title="Saved sessions", border_style="bright_cyan"))
 
     def _cmd_history(self, args: list[str]) -> None:
         count = int(args[0]) if args else 6
@@ -764,7 +793,7 @@ class ChatApp:
         for item in self.transcript[-count:]:
             role = str(item.get("role", "message")).title()
             content = sanitize_terminal_text(str(item.get("content", "")))
-            style = "cyan" if role == "User" else "green"
+            style = "green" if role == "User" else "bright_cyan"
             self.ui.console.print(Panel(Text(content), title=Text(role), border_style=style))
 
     def _last_assistant(self) -> dict[str, Any] | None:
@@ -832,7 +861,7 @@ class ChatApp:
             return
         value = sanitize_terminal_text(tail_log(path, lines=count))
         self.ui.console.print(
-            Panel(Text(value or "(empty)"), title=Text(str(path)), border_style="dim")
+            Panel(Text(value or "(empty)"), title=Text(str(path)), border_style="bright_cyan")
         )
 
     def _cmd_stop(self) -> None:

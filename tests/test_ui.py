@@ -190,9 +190,10 @@ def test_user_prompt_commits_text_once_and_audio_commands_use_inline_status(monk
         pipe.send_text("Hello there\n")
         assert ui.prompt() == "Hello there"
         assert output.getvalue().count("Hello there") == 1
-        assert "● You" in output.getvalue()
-        assert "╭" in output.getvalue()
-        assert "╰" in output.getvalue()
+        assert "● Hello there" in output.getvalue()
+        assert "You" not in output.getvalue()
+        assert "╭" not in output.getvalue()
+        assert "╰" not in output.getvalue()
         pipe.send_text("/voice\n")
         assert ui.prompt() == "/voice"
         pipe.send_text("/speak\n")
@@ -216,10 +217,10 @@ def test_user_boxes_use_full_width_and_grow_vertically():
     ui.console.print(live.renderable)
     rows = ui.console.file.getvalue().splitlines()
     spinner_row = next(row for row in rows if "Listening" in row)
-    assert spinner_row.startswith("│")
-    assert spinner_row.endswith("│")
-    assert rows[0].startswith("╭")
-    assert rows[-1].startswith("╰")
+    assert len(spinner_row) == 50
+    assert not any(char in "".join(rows) for char in "│╭╰")
+    assert ui.user_line("hello").style == "on #20352b"
+    assert ui.chat_panel(Text("answer")).style == "on #22313d"
 
 
 def test_escape_stops_server_and_escape_enter_still_inserts_newline(monkeypatch, tmp_path):
@@ -246,3 +247,87 @@ def test_escape_stops_server_and_escape_enter_still_inserts_newline(monkeypatch,
         bindings.get_bindings_for_keys(("escape", "c-m"))[0].handler(event)
         assert inserted == ["\n"]
         assert results == ["/stop"]
+
+
+def test_streaming_answer_starts_small_and_grows_to_viewport():
+    ui = object.__new__(TerminalUI)
+    ui.console = Console(file=io.StringIO(), width=50, height=24, color_system=None)
+    heights = []
+    for answer in ("Hello", "\n\n".join(f"Line {i}" for i in range(6)), "long text " * 500):
+        group = ui._live_group(
+            RenderState(GenerationResult(answer=answer), False, time.monotonic())
+        )
+        lines = ui.console.render_lines(group, ui.console.options)
+        heights.append(len(lines))
+    assert heights[0] == 4
+    assert heights[0] < heights[1] < heights[2]
+    assert heights[2] <= 24
+
+
+def test_generation_keeps_user_box_below_answer_and_within_screen():
+    ui = object.__new__(TerminalUI)
+    ui._interactive_prompt = True
+    output = io.StringIO()
+    ui.console = Console(file=output, width=50, height=24, color_system=None)
+    group = ui._live_group(
+        RenderState(
+            GenerationResult(answer="word " * 500, reasoning="thinking " * 300),
+            True,
+            time.monotonic(),
+        )
+    )
+    ui.console.print(group)
+    rendered = output.getvalue()
+    assert "Answer" not in rendered
+    assert "You" not in rendered
+    assert "◆" in rendered
+    assert "Generating…" in rendered
+    assert rendered.count("\n") <= 24
+
+
+def test_bottom_anchor_reserves_rows_without_clearing_history():
+    ui = object.__new__(TerminalUI)
+    ui._interactive_prompt = True
+    output = io.StringIO()
+    ui.console = Console(file=output, width=50, height=24)
+    ui._anchor_bottom()
+    assert output.getvalue() == "\x1b[24;1H\n\n\n\n\x1b[21;1H"
+
+
+@pytest.mark.parametrize(
+    ("think", "concise", "expected"),
+    [(False, False, "off"), (True, False, "on"), (True, True, "off")],
+)
+def test_info_panel_shows_explicit_thinking_and_audio_readiness(
+    monkeypatch, think, concise, expected
+):
+    from mlx_chat import tts, voice
+    from mlx_chat.config import Settings
+
+    ui = object.__new__(TerminalUI)
+    ui.settings = Settings(think=think, concise=concise)
+    ui._session_name = None
+    ui._message_count = 6
+    ui._banner_state = {"voice_ready": False}
+    monkeypatch.setattr(voice, "_model_ready", False)
+    monkeypatch.setattr(tts, "_engine", None)
+    output = io.StringIO()
+    console = Console(file=output, width=160, color_system=None)
+    console.print(ui.info_panel())
+    content = output.getvalue()
+    assert len(content.splitlines()) == 4
+    assert "Ready" not in content
+    assert content.index("TTS:") < content.index("STT:") < content.index("Session:")
+    assert f"Thinking: {expected}" in content
+    assert "Direct" not in content
+    assert "Turns: 3" in content
+    assert "STT: whisper-large-v3-turbo · not loaded" in content
+    assert "TTS: Kokoro-82M-bf16 · not loaded" in content
+    monkeypatch.setattr(voice, "_model_ready", True)
+    monkeypatch.setattr(tts, "_engine", object())
+    output.seek(0)
+    output.truncate(0)
+    console.print(ui.info_panel())
+    content = output.getvalue()
+    assert "STT: whisper-large-v3-turbo · ready" in content
+    assert "TTS: Kokoro-82M-bf16 · ready" in content

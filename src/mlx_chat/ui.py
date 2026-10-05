@@ -6,10 +6,10 @@ import os
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
-from html import escape as html_escape
 
-from prompt_toolkit import HTML, PromptSession
+from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import FuzzyWordCompleter
 from prompt_toolkit.filters import to_filter
 from prompt_toolkit.history import FileHistory
@@ -26,6 +26,7 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
+from . import tts, voice
 from .client import GenerationResult, StreamEvent
 from .config import Settings, history_path
 from .resources import resource_snapshot
@@ -96,6 +97,8 @@ class TerminalUI:
         self.settings = settings
         self._session_name: str | None = None
         self._message_count = 0
+        self._conversation = None
+        self._banner_state = {"reused": False, "managed": True, "voice_ready": False}
 
         bindings = KeyBindings()
 
@@ -144,6 +147,7 @@ class TerminalUI:
 
         # Frame only the editable input; keep the status toolbar outside it.
         root = self.prompt_session.layout.container
+        self._input_float_container = root.children[0].alternative_content
         self.prompt_session.layout.current_window.dont_extend_height = to_filter(True)
 
         def edge(char, width=None):
@@ -175,109 +179,184 @@ class TerminalUI:
             ],
         )
 
+    def enable_conversation(self) -> None:
+        if self._interactive_prompt and self._conversation is None:
+            from .conversation import ConversationView
+
+            self._conversation = ConversationView(self)
+
+    def close_conversation(self) -> None:
+        if self._conversation is not None:
+            self._conversation.close()
+            self._conversation = None
+
     def set_context(self, session_name: str | None, message_count: int) -> None:
         self._session_name = session_name
         self._message_count = message_count
 
-    def banner(self, *, reused: bool, managed: bool, voice_ready: bool = False) -> None:
-        state = "reused" if reused else "started"
-        ownership = "managed" if managed else "external"
-        grid = Table.grid(expand=True)
-        grid.add_column(ratio=1)
-        grid.add_column(justify="right")
-        grid.add_row(
-            Text("● Ready", style="bold green"),
-            Text(f"{state} · {ownership}", style="dim"),
+    def info_panel(self) -> Panel:
+        thinking = self.settings.think and not self.settings.concise
+        stt_ready = self._banner_state["voice_ready"] or voice.is_ready()
+        heading = Text(justify="center", no_wrap=True, overflow="ellipsis")
+        heading.append(short_model(self.settings.model), style="bold cyan")
+        heading.append(f"  ·  Thinking: {'on' if thinking else 'off'}", style="cyan")
+        if self.settings.concise:
+            heading.append("  ·  Concise", style="cyan")
+        details = Table.grid(expand=True, padding=(0, 1))
+        for _ in range(3):
+            details.add_column(ratio=1, justify="center", no_wrap=True, overflow="ellipsis")
+        audio_cells = []
+        for label, model, ready in (
+            ("TTS", tts.DEFAULT_TTS_MODEL, tts.is_ready()),
+            ("STT", voice.DEFAULT_TRANSCRIPTION_MODEL, stt_ready),
+        ):
+            cell = Text(f"{label}: {short_model(model)} · ", style="dim")
+            cell.append("ready" if ready else "not loaded", style="green" if ready else "dim")
+            audio_cells.append(cell)
+        session = Text(
+            f"Session: {self._session_name or 'unsaved'} · Turns: {self._message_count // 2}",
+            style="dim",
         )
-        grid.add_row(
-            Text(short_model(self.settings.model), style="bold cyan"),
-            Text(self.settings.base_url, style="blue"),
-        )
-        grid.add_row(
-            Text(f"Thinking: {'ON' if self.settings.think else 'OFF'}", style="yellow"),
-            Text(
-                f"temp {self.settings.temperature:g} · top-p {self.settings.top_p:g} · "
-                f"max {self.settings.max_tokens}",
-                style="dim",
-            ),
-        )
-        grid.add_row(
-            Text(
-                "Voice: ready" if voice_ready else "Voice: unavailable",
-                style="green" if voice_ready else "yellow",
-            ),
-            Text(
-                "Whisper Large v3 Turbo" if voice_ready else "install/setup required",
-                style="dim",
-            ),
-        )
-        self.console.print()
-        self.console.print(
-            Panel(
-                grid,
-                title="[bold]mlx-chat[/bold] · local Apple Silicon inference",
-                subtitle="[dim]Local by default · /web is explicitly opt-in[/dim]",
-                border_style="bright_blue",
-                box=box.ROUNDED,
-            )
-        )
-        self.console.print(
-            "[dim]Type [bold]/help[/bold] for commands · Esc+Enter adds a line · "
-            "Esc stops the server · Ctrl-C cancels · Ctrl-D exits[/dim]"
+        details.add_row(*audio_cells, session)
+        content = Group(heading, details)
+        return Panel(
+            content,
+            title="[bold]mlx-chat[/bold] · local",
+            title_align="left",
+            border_style="bright_cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
         )
 
-    def _toolbar(self) -> HTML:
-        if self.settings.concise:
-            mode = " CONCISE "
-        elif self.settings.think:
-            mode = " THINK "
-        else:
-            mode = " DIRECT "
-        session = self._session_name or "unsaved"
-        return HTML(
-            f" <b>{mode}</b>  {html_escape(short_model(self.settings.model, 26))}  "
-            f"session: {html_escape(session)}  turns: {self._message_count // 2} "
+    def banner(self, *, reused: bool, managed: bool, voice_ready: bool = False) -> None:
+        self._banner_state = {"reused": reused, "managed": managed, "voice_ready": voice_ready}
+        if self._conversation is None:
+            self.console.print()
+            self.console.print(self.info_panel())
+        if self._conversation is None:
+            self.console.print(Text(self.conversation_hint(), justify="center", style="dim"))
+
+    @staticmethod
+    def conversation_hint() -> str:
+        return "Try /help for commands · F1/F2 listen/stop · F3/F4 speak/stop"
+
+    @staticmethod
+    def message_content(content, *, user=False):
+        row = Table.grid(expand=True, padding=0)
+        row.add_column(width=2, no_wrap=True)
+        row.add_column(ratio=1, no_wrap=False, overflow="fold")
+        row.add_row(Text("●" if user else "◆", style="green" if user else "bright_cyan"), content)
+        return row
+
+    def chat_panel(
+        self, content, *, title="", border_style="bright_cyan", marker=True, **options
+    ) -> Panel:
+        user = border_style == "green"
+        background = "#20352b" if user else "#22313d"
+        options.pop("box", None)
+        options.pop("title_align", None)
+        options["padding"] = (0, 1)
+        return Panel(
+            self.message_content(content, user=user) if marker else content,
+            box=box.Box("    \n" * 8),
+            style=f"on {background}",
+            **options,
         )
 
     def user_line(self, value: str) -> Panel:
-        return Panel(
+        return self.chat_panel(
             Text(sanitize_terminal_text(value)),
-            title="[bold green]● You[/bold green]",
+            title="●",
             title_align="left",
             border_style="green",
             box=box.ROUNDED,
             padding=(0, 1),
         )
 
-    def audio_status(self, value: str) -> Live:
+    def run_audio(self, operation, *, stop_key="f2"):
+        if self._conversation is None:
+            return operation(None)
+        panel = self._conversation.pending
+        self._conversation.audio_key = stop_key
+        try:
+            return self._conversation.generate(
+                lambda callback: operation(self._conversation.cancelled), lambda _: panel
+            )
+        finally:
+            self._conversation.audio_key = None
+
+    def run_task(self, operation):
+        if self._conversation is None:
+            return operation()
+        return self._conversation.generate(lambda callback: operation(), lambda _: None)
+
+    def run_native(self, operation):
+        if self._conversation is None:
+            return operation()
+        return self._conversation.run_native(operation)
+
+    def audio_status(self, value: str):
+        if getattr(self, "_conversation", None) is not None:
+            return self._conversation.status(value, user=value.startswith("/voice"))
         # Put the animation in the panel's content row, between its borders.
         spinner = Spinner("dots", text=Text(sanitize_terminal_text(value)), style="green")
-        panel = self.user_line(value)
-        panel.renderable = spinner
+        panel = self.chat_panel(Text(value))
+        panel.renderable = self.message_content(spinner)
+        self._anchor_bottom(rows=3)
         return Live(panel, console=self.console, transient=True, refresh_per_second=10)
+
+    @contextmanager
+    def command_popup(self, title):
+        conversation = getattr(self, "_conversation", None)
+        if conversation is None:
+            yield
+        else:
+            with conversation.popup(title):
+                yield
+
+    def voice_message(self, text):
+        self.user_message(f"/voice {text}")
 
     def user_message(self, value: str) -> None:
         self.console.print(self.user_line(value))
 
+    def _anchor_bottom(self, rows: int = 4) -> None:
+        """Reserve bottom rows in the normal screen buffer, preserving scrollback."""
+        if (
+            not getattr(self, "_interactive_prompt", False)
+            or getattr(self, "_conversation", None) is not None
+        ):
+            return
+        height = self.console.size.height
+        rows = min(rows, max(1, height))
+        output = self.console.file
+        output.write(f"\x1b[{height};1H" + "\n" * rows + f"\x1b[{height - rows + 1};1H")
+        output.flush()
+
     def prompt(self) -> str:
+        self._anchor_bottom()
         value = self.prompt_session.prompt(
             "",
-            bottom_toolbar=self._toolbar,
+            bottom_toolbar=None,
             prompt_continuation=lambda width, _line, _wrap: " " * width,
         )
-        # Audio commands replace the input with their status and transcription.
-        # Other input is committed once after the editable prompt is erased.
-        if self._interactive_prompt and value.strip():
-            command = value.split()[0].lower()
-            if command not in {"/voice", "/speak"}:
-                self.user_message(value)
+        if value.strip() and (
+            not value.lstrip().startswith("/") or value.lstrip().startswith(("//", "/web "))
+        ):
+            self.user_message(value)
         return value
 
     def _notice(self, symbol: str, style: str, message: str) -> None:
-        text = Text()
-        text.append(f"{symbol} ", style=style)
-        text.append(message)
-        self.console.print(text)
+        self.console.print(
+            self.chat_panel(
+                Text(sanitize_terminal_text(message)),
+                title=Text(f"{symbol} System", style="bright_cyan"),
+                title_align="left",
+                border_style="bright_cyan",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        )
 
     def info(self, message: str) -> None:
         self._notice("◆", "cyan", message)
@@ -295,6 +374,11 @@ class TerminalUI:
         self.console.rule(Text(title), style="dim")
 
     def clear(self) -> None:
+        if getattr(self, "_conversation", None) is not None:
+            self._conversation.items.clear()
+            self._conversation.update(None)
+            self._conversation.follow = True
+            return
         output = self.console.file
         try:
             is_terminal = bool(output.isatty())
@@ -390,20 +474,40 @@ class TerminalUI:
                 placeholder=placeholder,
             )
         )
-        return Panel(
+        return self.chat_panel(
             content,
             title=title,
             title_align="left",
             border_style=border_style,
             box=box.ROUNDED,
             padding=(0, 1),
-            height=height,
+            height=min(
+                height,
+                max(
+                    3,
+                    len(
+                        self.console.render_lines(
+                            content, self.console.options.update(width=content_width), pad=False
+                        )
+                    )
+                    + 2,
+                ),
+            ),
         )
 
     def _live_group(self, state: RenderState) -> Group:
+        height = self.console.size.height
+        if getattr(self, "_interactive_prompt", False) and height >= 8:
+            response = self._live_response_group(state, terminal_height=height - 3)
+            return Group(response, self.chat_panel(Text("Generating… Ctrl-C to cancel")))
+        return self._live_response_group(state)
+
+    def _live_response_group(
+        self, state: RenderState, *, terminal_height: int | None = None
+    ) -> Group:
         result = state.result
         elapsed = time.monotonic() - state.started
-        terminal_height = max(1, self.console.size.height)
+        terminal_height = max(1, terminal_height or self.console.size.height)
         terminal_width = max(1, self.console.size.width)
         status = Text(
             f"  {elapsed:.1f}s · Ctrl-C to cancel",
@@ -488,6 +592,44 @@ class TerminalUI:
     ) -> GenerationResult:
         from rich.live import Live
 
+        if getattr(self, "_conversation", None) is not None:
+
+            def preview(result):
+                result = result or GenerationResult()
+                panels = []
+                if think or result.reasoning:
+                    panels.append(
+                        self.chat_panel(
+                            Text(sanitize_terminal_text(result.reasoning) or "Thinking…"),
+                            title="◆ Reasoning",
+                            title_align="left",
+                            border_style="yellow",
+                            box=box.ROUNDED,
+                            padding=(0, 1),
+                        )
+                    )
+                panels.append(
+                    self.chat_panel(
+                        Markdown(
+                            sanitize_terminal_text(result.answer) or "Waiting…",
+                            code_theme="monokai",
+                            hyperlinks=True,
+                        ),
+                        title="◆ Answer",
+                        title_align="left",
+                        border_style="bright_cyan",
+                        box=box.ROUNDED,
+                        padding=(0, 1),
+                    )
+                )
+                return Group(*panels)
+
+            result = self._conversation.generate(generate, preview)
+            self.final_generation(result, think=think)
+            return result
+
+        if getattr(self, "_interactive_prompt", False):
+            self._anchor_bottom(rows=7)
         preview = GenerationResult()
         state = RenderState(preview, think, time.monotonic())
         last_refresh = 0.0
@@ -521,7 +663,7 @@ class TerminalUI:
     def final_generation(self, result: GenerationResult, *, think: bool) -> None:
         if result.reasoning:
             self.console.print(
-                Panel(
+                self.chat_panel(
                     Text(sanitize_terminal_text(result.reasoning), style="dim"),
                     title="[yellow]◆ Reasoning[/yellow]",
                     title_align="left",
@@ -539,7 +681,7 @@ class TerminalUI:
         else:
             renderable = Text("No final answer was returned.", style="italic dim")
         self.console.print(
-            Panel(
+            self.chat_panel(
                 renderable,
                 title="[bright_cyan]◆ Answer[/bright_cyan]",
                 title_align="left",
@@ -571,7 +713,15 @@ class TerminalUI:
                 metrics.append(f"CPU {server.cpu_percent:.1f}%")
             if server.memory_mib is not None:
                 metrics.append(f"RAM {server.memory_mib:,.0f} MiB")
-        self.console.print(Text("  " + " · ".join(metrics), style="dim"))
+        self.generation_info(" · ".join(metrics))
+
+    def generation_info(self, value: str) -> None:
+        metadata = Text("  " + value, style="dim", no_wrap=True, overflow="ellipsis")
+        conversation = getattr(self, "_conversation", None)
+        if conversation is not None:
+            conversation.print_info(metadata)
+        else:
+            self.console.print(metadata)
 
     def help(self) -> None:
         table = Table(
@@ -614,13 +764,13 @@ class TerminalUI:
         for command, description in rows:
             table.add_row(command, description)
         self.console.print(
-            Panel(table, title="mlx-chat commands", border_style="bright_blue", box=box.ROUNDED)
+            self.chat_panel(table, marker=False, border_style="bright_cyan", box=box.ROUNDED)
         )
-        self.console.print(
-            "[dim]Tip: start a message with // to send a literal /. "
+        self.generation_info(
+            "Tip: start a message with // to send a literal /. "
             "Esc+Enter inserts a newline · F1 listens · F2 stops listening · "
             "F3 speaks · F4 stops speech · "
-            "Ctrl-C stops audio.[/dim]"
+            "Ctrl-C stops audio."
         )
 
 

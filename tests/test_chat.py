@@ -179,11 +179,14 @@ def test_voice_transcription_is_rendered_as_user_input(monkeypatch):
     generations = []
     app.ui = SimpleNamespace(
         audio_status=lambda text: statuses.append(text) or nullcontext(),
+        run_audio=lambda operation: operation(None),
+        run_native=lambda operation: operation(),
         user_message=user_messages.append,
     )
-    monkeypatch.setattr(chat, "transcribe_microphone", lambda **kw: "My spoken question")
+    monkeypatch.setattr(chat, "record_microphone", lambda **kw: "audio")
+    monkeypatch.setattr(chat, "transcribe_audio", lambda audio, **kw: "My spoken question")
     app._generate = lambda text, **kw: generations.append(text)
     app._cmd_voice([])
-    assert statuses == ["Listening… F2 to finish · up to 30s"]
+    assert statuses == ["/voice Listening… F2 to finish · up to 30s", "/voice Transcribing…"]
     assert user_messages == ["My spoken question"]
     assert generations == ["My spoken question"]
