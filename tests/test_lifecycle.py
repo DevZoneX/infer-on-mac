@@ -69,6 +69,62 @@ def test_cleanup_never_stops_a_replacement_server(monkeypatch):
     assert stopped == []
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_ephemeral_chat_cleans_current_server_after_model_switch(monkeypatch, failure):
+    settings = Settings(model="old/model")
+    original = StartResult("old/model", settings.host, settings.port, 100, None, False, True, "old")
+    switched = StartResult("new/model", settings.host, settings.port, 200, None, False, True, "new")
+    cleanup = []
+    monkeypatch.setattr(cli, "settings_from_args", lambda _args: settings)
+    monkeypatch.setattr(cli, "ensure_server", lambda *_args, **_kwargs: original)
+    monkeypatch.setattr(cli, "_stop_new_server", lambda _settings, result: cleanup.append(result))
+
+    class FakeApp:
+        def __init__(self, *_args, **_kwargs):
+            self.start_result = original
+
+        def run(self):
+            settings.model = "new/model"
+            self.start_result = switched
+            if failure:
+                raise MlxChatError("chat failed")
+            return 0
+
+    monkeypatch.setattr("mlx_chat.chat.ChatApp", FakeApp)
+    args = cli.build_parser().parse_args(["chat", "--ephemeral", "--plain"])
+    if failure:
+        with pytest.raises(MlxChatError, match="chat failed"):
+            cli.run_chat(args)
+    else:
+        assert cli.run_chat(args) == 0
+
+    assert cleanup == [switched]
+
+
+def test_interrupted_chat_initialization_cleans_new_server(monkeypatch):
+    settings = Settings()
+    result = StartResult(
+        settings.model, settings.host, settings.port, 100, None, False, True, "new"
+    )
+    cleanup = []
+    monkeypatch.setattr(cli, "settings_from_args", lambda _args: settings)
+    monkeypatch.setattr(cli, "ensure_server", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(
+        cli, "_stop_new_server", lambda _settings, result, **_kwargs: cleanup.append(result)
+    )
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("mlx_chat.chat.ChatApp", interrupt)
+    args = cli.build_parser().parse_args(["chat", "--plain"])
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_chat(args)
+
+    assert cleanup == [result]
+
+
 def test_failed_model_switch_restores_previous_model(monkeypatch):
     settings = Settings(
         model="new/model",

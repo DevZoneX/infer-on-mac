@@ -8,8 +8,6 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from ddgs import DDGS
-
 from .config import Settings
 from .errors import MlxChatError
 
@@ -75,6 +73,13 @@ class WebSearcher:
         if len(query) > MAX_QUERY_CHARS:
             raise MlxChatError(f"Web queries must be at most {MAX_QUERY_CHARS} characters.")
 
+        try:
+            from ddgs import DDGS
+        except ImportError as exc:
+            raise MlxChatError(
+                "Web search is optional. Install it with `uv sync --extra web` "
+                "or `./setup.sh --web`."
+            ) from exc
         try:
             raw = list(
                 DDGS(timeout=self.settings.web_timeout).text(

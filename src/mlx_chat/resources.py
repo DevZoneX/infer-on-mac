@@ -15,11 +15,6 @@ class ProcessResources:
     memory_mib: float | None
 
 
-@dataclass(frozen=True)
-class ResourceSnapshot:
-    processes: list[ProcessResources]
-
-
 def _process_resources(record: ServerRecord) -> ProcessResources:
     try:
         output = subprocess.run(
@@ -37,5 +32,6 @@ def _process_resources(record: ServerRecord) -> ProcessResources:
     return ProcessResources(record.port, cpu, memory)
 
 
-def resource_snapshot() -> ResourceSnapshot:
-    return ResourceSnapshot(processes=[_process_resources(record) for record in list_records()])
+def resource_snapshot(port: int) -> ProcessResources | None:
+    record = next((item for item in list_records() if item.port == port), None)
+    return _process_resources(record) if record is not None else None

@@ -192,3 +192,31 @@ def test_history_path_creates_parent_directory():
 
     assert path.name == "prompt_history"
     assert path.parent.is_dir()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_repetition_penalty_rejects_non_finite_values(value):
+    with pytest.raises(MlxChatError, match="repetition_penalty"):
+        Settings(repetition_penalty=value)
+
+
+@pytest.mark.parametrize("value", [[], {}, None])
+def test_safesearch_rejects_invalid_types(value):
+    with pytest.raises(MlxChatError, match="web_safesearch"):
+        Settings(web_safesearch=value)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"preload_voice": "true"},
+        {"context_tokens": True},
+        {"context_tokens": 0},
+        {"context_tokens": 4096},
+        {"connect_timeout": 0},
+        {"connect_timeout": 1.5},
+    ],
+)
+def test_runtime_improvement_settings_are_validated(overrides):
+    with pytest.raises(MlxChatError):
+        Settings(**overrides)

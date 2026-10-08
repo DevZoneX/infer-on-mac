@@ -125,11 +125,15 @@ def _read_registry_unlocked() -> list[ServerRecord]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         raw_records = value.get("servers", []) if isinstance(value, dict) else []
+        if not isinstance(raw_records, list):
+            return []
         records = []
         for raw in raw_records:
+            if not isinstance(raw, dict):
+                continue
             try:
                 records.append(ServerRecord.from_dict(raw))
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):
                 continue
         return records
     except (OSError, json.JSONDecodeError):

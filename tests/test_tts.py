@@ -19,6 +19,13 @@ def test_clean_text():
     )
 
 
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_speech_omits_unfinished_code_blocks(fence):
+    assert tts.speech_text(f"Here is the example:\n{fence}python\nprint('hello')") == (
+        "Here is the example:"
+    )
+
+
 def test_speak_uses_only_english_kokoro(monkeypatch):
     engine = Mock()
     monkeypatch.setattr(tts, "_load_engine", lambda: engine)

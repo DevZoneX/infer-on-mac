@@ -26,7 +26,7 @@ def speech_text(text: str) -> str:
     """Read prose, not emoji, Markdown, code blocks, URLs, or model tokens."""
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     text = re.sub(r"<\|[^>]*\|>|\[/?(?:INST|SYS)\]|</?s>", "", text)
-    text = re.sub(r"```.*?```|~~~.*?~~~", " ", text, flags=re.DOTALL)
+    text = re.sub(r"```.*?(?:```|$)|~~~.*?(?:~~~|$)", " ", text, flags=re.DOTALL)
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"https?://\S+|www\.\S+", "", text)
     text = re.sub(r"<[^>]+>", "", text)
@@ -80,9 +80,7 @@ def speak(text: str, *, stop_event=None) -> bool:
                     engine.speak(text, voice=DEFAULT_TTS_VOICE, stream=True, stop_event=stopped)
                 return stopped.is_set()
     except ImportError as exc:
-        raise MlxChatError(
-            "Speech output is not installed. Run `uv sync --extra dev --extra voice`."
-        ) from exc
+        raise MlxChatError("Speech output is not installed. Run `uv sync --extra voice`.") from exc
     except KeyboardInterrupt:
         try:
             import sounddevice as sd

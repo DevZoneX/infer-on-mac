@@ -104,12 +104,12 @@ def test_sse_stream_parses_keepalive_usage_reasoning_content_and_finish(monkeypa
     response = FakeResponse(packets)
     captured = {}
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, **kwargs):
         captured["request"] = request
         captured["timeout"] = timeout
         return response
 
-    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", fake_urlopen)
     client = ChatClient(Settings(model="test-model", request_timeout=123))
 
     events = list(client.stream_chat([{"role": "user", "content": "hi"}], think=True))
@@ -140,7 +140,7 @@ def test_sse_stream_splits_legacy_think_tags_across_packets(monkeypatch):
             b"data: [DONE]\n",
         ]
     )
-    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", lambda *_args, **_kw: response)
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: response)
 
     events = list(ChatClient(Settings()).stream_chat([], think=True))
 
@@ -159,7 +159,7 @@ def test_sse_stream_accepts_message_shape_and_thinking_alias(monkeypatch):
             b"data: [DONE]\n",
         ]
     )
-    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", lambda *_args, **_kw: response)
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: response)
 
     events = list(ChatClient(Settings()).stream_chat([], think=True))
 
@@ -172,7 +172,7 @@ def test_sse_stream_accepts_message_shape_and_thinking_alias(monkeypatch):
 
 def test_sse_rejects_non_event_stream_response(monkeypatch):
     response = FakeResponse(content_type="application/json", body=b'{"error":"wrong endpoint"}')
-    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", lambda *_args, **_kw: response)
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: response)
 
     with pytest.raises(ApiError, match="Expected an event stream"):
         list(ChatClient(Settings()).stream_chat([], think=False))
@@ -188,7 +188,7 @@ def test_sse_rejects_non_event_stream_response(monkeypatch):
 )
 def test_sse_reports_malformed_or_error_packets(monkeypatch, line, message):
     response = FakeResponse([line])
-    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", lambda *_args, **_kw: response)
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: response)
 
     with pytest.raises(ApiError, match=message):
         list(ChatClient(Settings()).stream_chat([], think=False))
@@ -196,12 +196,12 @@ def test_sse_reports_malformed_or_error_packets(monkeypatch, line, message):
 
 def test_sse_rejects_non_object_packets_and_unexpected_eof(monkeypatch):
     non_object = FakeResponse([b"data: []\n", b"data: [DONE]\n"])
-    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", lambda *_args, **_kw: non_object)
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: non_object)
     with pytest.raises(ApiError, match="expected a JSON object"):
         list(ChatClient(Settings()).stream_chat([], think=False))
 
     truncated = FakeResponse([data_line({"choices": [{"delta": {"content": "partial"}}]})])
-    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", lambda *_args, **_kw: truncated)
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: truncated)
     with pytest.raises(ApiError, match="ended unexpectedly"):
         list(ChatClient(Settings()).stream_chat([], think=False))
 
@@ -282,3 +282,38 @@ def test_cancel_keeps_partial_answer_and_reasoning_and_closes_stream(monkeypatch
     assert result.finish_reason == "cancelled"
     assert result.first_token_seconds is not None
     assert closed == [True]
+
+
+@pytest.mark.parametrize("choices", [42, "invalid", {"delta": {}}, [None], ["invalid"]])
+def test_stream_reports_invalid_choices_as_api_error(monkeypatch, choices):
+    response = FakeResponse([data_line({"choices": choices}), b"data: [DONE]\n"])
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: response)
+
+    with pytest.raises(ApiError, match="choices"):
+        ChatClient(Settings()).collect([], think=False)
+
+
+def test_switching_to_native_reasoning_preserves_pending_content(monkeypatch):
+    response = FakeResponse(
+        [
+            data_line({"choices": [{"delta": {"content": "Use <"}}]}),
+            data_line({"choices": [{"delta": {"reasoning": "explanation"}}]}),
+            data_line({"choices": [{"delta": {"content": " for comparison."}}]}),
+            b"data: [DONE]\n",
+        ]
+    )
+    monkeypatch.setattr("mlx_chat.client.StreamingResponse", lambda *_args, **_kw: response)
+
+    result = ChatClient(Settings()).collect([], think=True)
+
+    assert result.answer == "Use < for comparison."
+    assert result.reasoning == "explanation"
+
+
+@pytest.mark.parametrize("data", [None, 42, "invalid", {"id": "model"}])
+def test_list_models_reports_invalid_data_as_api_error(monkeypatch, data):
+    response = FakeResponse(body=json.dumps({"data": data}).encode())
+    monkeypatch.setattr("mlx_chat.client.urllib.request.urlopen", lambda *_args, **_kw: response)
+
+    with pytest.raises(ApiError, match="model list"):
+        ChatClient(Settings()).list_models()

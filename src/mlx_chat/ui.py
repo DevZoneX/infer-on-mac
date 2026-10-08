@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import re
-import subprocess
-import time
-from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.clipboard import ClipboardData
@@ -23,8 +17,6 @@ from prompt_toolkit.styles import Style as PromptStyle
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
-from rich.markdown import Markdown
-from rich.padding import Padding
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.style import Style as RichStyle
@@ -32,156 +24,19 @@ from rich.table import Table
 from rich.text import Text
 
 from . import tts, voice
-from .client import GenerationResult, StreamEvent
+from .commands import SLASH_COMMANDS as SLASH_COMMANDS
 from .config import Settings, history_path
-from .resources import resource_snapshot
+from .errors import MlxChatError
+from .rendering import AnswerPanel, GenerationPresentation, ThinkingTrace
+from .sessions import result_from_message
+from .startup import StartupStatus
+from .terminal import copy_text, paste_text
+from .terminal import sanitize_terminal_text as sanitize_terminal_text
+from .terminal import short_model as short_model
 from .theme import ACCENT, BORDER, MUTED, SURFACE
 
-ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
-READ_ONLY_COMMANDS = {
-    "/help",
-    "/system",
-    "/settings",
-    "/stats",
-    "/status",
-    "/model",
-    "/sessions",
-    "/history",
-    "/logs",
-}
-
-SLASH_COMMANDS = [
-    "/help",
-    "/web",
-    "/think",
-    "/concise",
-    "/voice",
-    "/speak",
-    "/new",
-    "/reset",
-    "/clear",
-    "/system",
-    "/retry",
-    "/undo",
-    "/settings",
-    "/temperature",
-    "/top-p",
-    "/top-k",
-    "/max-tokens",
-    "/stats",
-    "/status",
-    "/model",
-    "/save",
-    "/load",
-    "/sessions",
-    "/history",
-    "/copy",
-    "/export",
-    "/logs",
-    "/restart",
-    "/stop",
-    "/exit",
-]
-
-
-def sanitize_terminal_text(value: str) -> str:
-    """Remove terminal control sequences while preserving newlines and tabs."""
-    value = ANSI_RE.sub("", value)
-    return "".join(
-        char
-        for char in value
-        if char in {"\n", "\t"} or (ord(char) >= 32 and not 127 <= ord(char) <= 159)
-    )
-
-
-def short_model(model: str, maximum: int = 38) -> str:
-    value = model.rsplit("/", 1)[-1]
-    return value if len(value) <= maximum else f"{value[: maximum - 1]}…"
-
-
-@dataclass
-class RenderState:
-    result: GenerationResult
-    think: bool
-    started: float
-
-
-class ThinkingTrace(Panel):
-    """A compact label whose trace can be expanded with the mouse."""
-
-    def __init__(self, text=""):
-        super().__init__(Text("Thinking"))
-        self.text = text
-        self.expanded = False
-        self.loading = False
-        self.spinner = Spinner("dots")
-
-    def __rich_console__(self, console, options):
-        label = Text()
-        if self.loading:
-            label.append(self.spinner.render(time.monotonic()))
-        else:
-            label.append("◆")
-        label.append(" Thinking")
-        label.append(
-            "  ·  click to collapse" if self.expanded else "  ·  click to expand", style="dim"
-        )
-        label.stylize(RichStyle(color=MUTED, meta={"thinking_trace": id(self)}))
-        content = [label]
-        if self.expanded:
-            content.append(
-                Padding(Text(sanitize_terminal_text(self.text) or "Thinking…", style="dim"), (0, 2))
-            )
-        yield Padding(Group(*content), (1, 2, 0, 2))
-
-
-class AnswerPanel(Panel):
-    """Keep the response and its metadata together without a bottom spacer."""
-
-    def __rich_console__(self, console, options):
-        yield Padding(self.renderable, (1, 2, 0, 2))
-
-
-class StartupStatus:
-    """A calm startup card with one changing status line."""
-
-    def __init__(self, console, model, message):
-        self.console = console
-        self.model = model
-        self.message = message
-        self.live = Live(self.render(), console=console, transient=True, refresh_per_second=8)
-
-    def render(self):
-        message = self.message.plain if isinstance(self.message, Text) else str(self.message)
-        content = Group(
-            Text("◆ mlx-chat", style=f"bold {ACCENT}"),
-            Text(short_model(self.model), style="bold"),
-            Text("Local intelligence · Apple Silicon", style="dim"),
-            Text(""),
-            Spinner("dots", text=Text(message, style=MUTED), style=ACCENT),
-        )
-        return Panel(
-            content,
-            box=box.ROUNDED,
-            border_style=BORDER,
-            padding=(1, 2),
-            width=min(68, self.console.width),
-        )
-
-    def update(self, message):
-        self.message = message
-        self.live.update(self.render())
-
-    def __enter__(self):
-        self.live.__enter__()
-        return self
-
-    def __exit__(self, *args):
-        return self.live.__exit__(*args)
-
-
-class TerminalUI:
+class TerminalUI(GenerationPresentation):
     def __init__(self, settings: Settings, *, plain: bool = False):
         force_terminal = None if not plain else False
         self.console = Console(force_terminal=force_terminal, no_color=plain)
@@ -191,8 +46,6 @@ class TerminalUI:
         self._message_count = 0
         self._conversation = None
         self.server_stopped = False
-        self.command_previewer = self.preview_command
-        self.last_preview_command = None
         self._banner_state = {"reused": False, "managed": True, "voice_ready": False}
 
         bindings = KeyBindings()
@@ -218,8 +71,8 @@ class TerminalUI:
                 buffer.selection_state = selection
             event.app.clipboard.set_data(data)
             try:
-                subprocess.run(["pbcopy"], input=data.text, text=True, check=True, timeout=2)
-            except (OSError, subprocess.SubprocessError):
+                copy_text(data.text)
+            except MlxChatError:
                 self.warning("Could not copy input to the macOS clipboard.")
 
         @bindings.add("c-c", filter=selected, eager=True)
@@ -233,11 +86,9 @@ class TerminalUI:
         @bindings.add("c-v", filter=editable, eager=True)
         def paste(event):
             try:
-                text = subprocess.run(
-                    ["pbpaste"], capture_output=True, text=True, check=True, timeout=2
-                ).stdout
+                text = paste_text()
                 event.app.clipboard.set_data(ClipboardData(text))
-            except (OSError, subprocess.SubprocessError):
+            except MlxChatError:
                 text = event.app.clipboard.get_data().text
             if event.current_buffer.selection_state:
                 event.current_buffer.cut_selection()
@@ -442,26 +293,13 @@ class TerminalUI:
         row.add_row(Text("●" if user else "◆", style=ACCENT if user else MUTED), content)
         return row
 
-    def chat_panel(
-        self,
-        content,
-        *,
-        title="",
-        border_style="bright_cyan",
-        marker=True,
-        compact_bottom=False,
-        **options,
-    ) -> Panel:
-        user = border_style == "green"
-        background = SURFACE if user else None
-        options.pop("box", None)
-        options.pop("title_align", None)
-        options["padding"] = (0, 1)
-        panel_type = AnswerPanel if compact_bottom else Panel
-        return panel_type(
+    def chat_panel(self, content, *, user=False, marker=True, compact_bottom=False, **options):
+        panel = AnswerPanel if compact_bottom else Panel
+        return panel(
             self.message_content(content, user=user) if marker else content,
             box=box.Box("    \n" * 8),
-            style=f"on {background}" if background else "",
+            style=f"on {SURFACE}" if user else "",
+            padding=(0, 1),
             **options,
         )
 
@@ -476,12 +314,22 @@ class TerminalUI:
     def user_line(self, value: str) -> Panel:
         return self.chat_panel(
             Text(sanitize_terminal_text(value)),
-            title="●",
-            title_align="left",
-            border_style="green",
-            box=box.ROUNDED,
-            padding=(0, 1),
+            user=True,
         )
+
+    @property
+    def cancellation_event(self):
+        return self._conversation.cancelled if self._conversation is not None else None
+
+    def restore_transcript(self, messages, *, replace=True):
+        if replace:
+            self.clear()
+        for message in messages:
+            if message["role"] == "user":
+                self.user_message(message["content"])
+            else:
+                result = result_from_message(message)
+                self.final_generation(result, think=bool(result.reasoning), historical=True)
 
     def run_audio(self, operation, *, stop_key="f3"):
         if self._conversation is None:
@@ -512,7 +360,6 @@ class TerminalUI:
         spinner = Spinner("dots", text=Text(sanitize_terminal_text(value)), style=ACCENT)
         panel = self.chat_panel(Text(value))
         panel.renderable = self.message_content(spinner)
-        self._anchor_bottom(rows=3)
         return Live(panel, console=self.console, transient=True, refresh_per_second=10)
 
     def preview_command(self, command):
@@ -536,21 +383,7 @@ class TerminalUI:
     def user_message(self, value: str) -> None:
         self.console.print(self.user_line(value))
 
-    def _anchor_bottom(self, rows: int = 4) -> None:
-        """Reserve bottom rows in the normal screen buffer, preserving scrollback."""
-        if (
-            not getattr(self, "_interactive_prompt", False)
-            or getattr(self, "_conversation", None) is not None
-        ):
-            return
-        height = self.console.size.height
-        rows = min(rows, max(1, height))
-        output = self.console.file
-        output.write(f"\x1b[{height};1H" + "\n" * rows + f"\x1b[{height - rows + 1};1H")
-        output.flush()
-
     def prompt(self) -> str:
-        self._anchor_bottom()
         conversation = getattr(self, "_conversation", None)
         if conversation is not None and conversation.submitted_inputs:
             value = conversation.submitted_inputs.popleft()
@@ -568,11 +401,6 @@ class TerminalUI:
                 raise
         if conversation is not None:
             conversation.draft_text = ""
-            self.last_preview_command = (
-                conversation.popup_title
-                if conversation.popup_preview and value.strip().lower() == conversation.popup_title
-                else None
-            )
             conversation.dismiss_preview()
         if value.strip() and (
             not value.lstrip().startswith("/") or value.lstrip().startswith(("//", "/web "))
@@ -580,29 +408,17 @@ class TerminalUI:
             self.user_message(value)
         return value
 
-    def _notice(self, symbol: str, style: str, message: str) -> None:
-        self.console.print(
-            self.chat_panel(
-                Text(sanitize_terminal_text(message)),
-                title=Text(f"{symbol} System", style="bright_cyan"),
-                title_align="left",
-                border_style="bright_cyan",
-                box=box.ROUNDED,
-                padding=(0, 1),
-            )
-        )
-
     def info(self, message: str) -> None:
-        self._notice("◆", "cyan", message)
+        self.console.print(self.chat_panel(Text(sanitize_terminal_text(message))))
 
     def success(self, message: str) -> None:
-        self._notice("✓", "green", message)
+        self.info(message)
 
     def warning(self, message: str) -> None:
-        self._notice("⚠", "yellow", message)
+        self.info(message)
 
     def error(self, message: str) -> None:
-        self._notice("Error:", "bold red", message)
+        self.info(message)
 
     def rule(self, title: str = "") -> None:
         self.console.rule(Text(title), style="dim")
@@ -610,6 +426,9 @@ class TerminalUI:
     def clear(self) -> None:
         if getattr(self, "_conversation", None) is not None:
             self._conversation.items.clear()
+            self._conversation.thinking_traces.clear()
+            self._conversation.trace_item_indices.clear()
+            self._conversation.selection = None
             self._conversation._history_width = None
             self._conversation.update(None)
             self._conversation.follow = True
@@ -628,324 +447,6 @@ class TerminalUI:
         # leaves the previous conversation reachable in terminal scrollback.
         output.write("\x1b[3J\x1b[H\x1b[2J")
         output.flush()
-
-    def _live_text(
-        self,
-        value: str,
-        *,
-        style: str,
-        width: int,
-        max_lines: int,
-        placeholder: str,
-    ) -> Text:
-        """Build a tail-following text viewport with a fixed line budget."""
-
-        source = Text(sanitize_terminal_text(value) or placeholder, style=style)
-        wrapped = source.wrap(self.console, max(1, width), overflow="fold")
-        max_lines = max(1, max_lines)
-        if len(wrapped) <= max_lines:
-            return Text("\n").join(wrapped)
-
-        if max_lines == 1:
-            tail = wrapped[-1].copy()
-            tail.truncate(max(1, width), overflow="ellipsis")
-            return tail
-
-        visible = wrapped[-(max_lines - 1) :]
-        output = Text("…", style="dim")
-        for line in visible:
-            output.append("\n")
-            output.append_text(line)
-        return output
-
-    def _live_markdown(
-        self, value: str, *, width: int, max_lines: int, placeholder: str
-    ) -> Text | Group:
-        """Render streamed Markdown on every refresh, retaining link metadata."""
-        source = sanitize_terminal_text(value)
-        if not source:
-            return Text(placeholder, style="dim italic")
-        # Render the whole document first so headings, lists, code, and URLs
-        # are styled while tokens are arriving. Keep its tail afterward so a
-        # long generation continues to follow the newest text in a small pane.
-        lines = self.console.render_lines(
-            Markdown(source, code_theme="monokai", hyperlinks=True),
-            self.console.options.update(width=max(1, width)),
-            pad=False,
-        )
-        visible = lines[-max(1, max_lines) :]
-        rendered_lines = []
-        for line in visible:
-            text = Text()
-            for segment in line:
-                text.append(segment.text, style=segment.style)
-            rendered_lines.append(text)
-        return Group(*rendered_lines)
-
-    def _live_panel(
-        self,
-        value: str,
-        *,
-        title: str,
-        style: str,
-        border_style: str,
-        height: int,
-        placeholder: str,
-    ) -> Panel:
-        content_width = max(1, self.console.size.width - 4)
-        content = (
-            self._live_markdown(
-                value,
-                width=content_width,
-                max_lines=max(1, height - 2),
-                placeholder=placeholder,
-            )
-            if title.endswith("Answer[/bright_cyan]")
-            else self._live_text(
-                value,
-                style=style,
-                width=content_width,
-                max_lines=max(1, height - 2),
-                placeholder=placeholder,
-            )
-        )
-        return self.chat_panel(
-            content,
-            title=title,
-            title_align="left",
-            border_style=border_style,
-            box=box.ROUNDED,
-            padding=(0, 1),
-            height=min(
-                height,
-                max(
-                    3,
-                    len(
-                        self.console.render_lines(
-                            content, self.console.options.update(width=content_width), pad=False
-                        )
-                    )
-                    + 2,
-                ),
-            ),
-        )
-
-    def _live_group(self, state: RenderState) -> Group:
-        height = self.console.size.height
-        if getattr(self, "_interactive_prompt", False) and height >= 8:
-            response = self._live_response_group(state, terminal_height=height - 3)
-            return Group(response, self.chat_panel(Text("Generating… Ctrl-C to cancel")))
-        return self._live_response_group(state)
-
-    def _live_response_group(
-        self, state: RenderState, *, terminal_height: int | None = None
-    ) -> Group:
-        result = state.result
-        elapsed = time.monotonic() - state.started
-        terminal_height = max(1, terminal_height or self.console.size.height)
-        terminal_width = max(1, self.console.size.width)
-        status = Text(
-            f"  {elapsed:.1f}s · Ctrl-C to cancel",
-            style="dim",
-            overflow="ellipsis",
-            no_wrap=True,
-        )
-
-        show_reasoning = state.think or bool(result.reasoning)
-        answer_started = bool(result.answer)
-
-        # Extremely short or narrow terminals can't accommodate panel borders.
-        # Keep a compact tail plus status instead of allowing Rich to scroll.
-        if terminal_height < 4 or terminal_width < 12:
-            active = result.answer if answer_started else result.reasoning
-            placeholder = "Waiting…" if answer_started else "Thinking…"
-            preview_lines = terminal_height - 1 if terminal_height > 1 else 1
-            preview = self._live_text(
-                active,
-                style="",
-                width=terminal_width,
-                max_lines=preview_lines,
-                placeholder=placeholder,
-            )
-            return Group(preview, status) if terminal_height > 1 else Group(preview)
-
-        panel_budget = terminal_height - 1  # reserve one row for elapsed time
-        if show_reasoning and terminal_height >= 7:
-            if answer_started:
-                reasoning_height = max(3, (panel_budget * 2) // 5)
-                answer_height = panel_budget - reasoning_height
-                if answer_height < 3:
-                    answer_height = 3
-                    reasoning_height = panel_budget - answer_height
-            else:
-                answer_height = 3
-                reasoning_height = panel_budget - answer_height
-            reasoning_panel = self._live_panel(
-                result.reasoning,
-                title="[yellow]◆ Reasoning[/yellow]",
-                style="dim italic",
-                border_style="yellow",
-                height=reasoning_height,
-                placeholder="Thinking…",
-            )
-            answer_panel = self._live_panel(
-                result.answer,
-                title="[bright_cyan]◆ Answer[/bright_cyan]",
-                style="",
-                border_style="bright_cyan",
-                height=answer_height,
-                placeholder="Waiting for the answer…",
-            )
-            return Group(reasoning_panel, answer_panel, status)
-
-        panel_height = max(3, panel_budget)
-        if show_reasoning and not answer_started:
-            panel = self._live_panel(
-                result.reasoning,
-                title="[yellow]◆ Reasoning[/yellow]",
-                style="dim italic",
-                border_style="yellow",
-                height=panel_height,
-                placeholder="Thinking…",
-            )
-        else:
-            panel = self._live_panel(
-                result.answer,
-                title="[bright_cyan]◆ Answer[/bright_cyan]",
-                style="",
-                border_style="bright_cyan",
-                height=panel_height,
-                placeholder="Waiting for the answer…",
-            )
-        return Group(panel, status)
-
-    def render_generation(
-        self,
-        generate: Callable[[Callable[[StreamEvent, GenerationResult], None]], GenerationResult],
-        *,
-        think: bool,
-    ) -> GenerationResult:
-        from rich.live import Live
-
-        if getattr(self, "_conversation", None) is not None:
-            trace = self.thinking_trace("")
-
-            def preview(result):
-                result = result or GenerationResult()
-                panels = []
-                if think or result.reasoning:
-                    trace.text = result.reasoning
-                    trace.loading = not bool(result.answer)
-                    panels.append(trace)
-                panels.append(
-                    self.chat_panel(
-                        Markdown(
-                            sanitize_terminal_text(result.answer) or "Waiting…",
-                            code_theme="monokai",
-                            hyperlinks=True,
-                        ),
-                        title="◆ Answer",
-                        compact_bottom=True,
-                        title_align="left",
-                        border_style="bright_cyan",
-                        box=box.ROUNDED,
-                        padding=(0, 1),
-                    )
-                )
-                return Group(*panels)
-
-            result = self._conversation.generate(generate, preview, allow_input=True)
-            self.final_generation(result, think=think)
-            return result
-
-        if getattr(self, "_interactive_prompt", False):
-            self._anchor_bottom(rows=7)
-        preview = GenerationResult()
-        state = RenderState(preview, think, time.monotonic())
-        last_refresh = 0.0
-        live = Live(
-            self._live_group(state),
-            console=self.console,
-            auto_refresh=False,
-            transient=True,
-            vertical_overflow="ellipsis",
-        )
-
-        def on_event(_event: StreamEvent, result: GenerationResult) -> None:
-            nonlocal last_refresh
-            state.result = result
-            now = time.monotonic()
-            if now - last_refresh >= 0.065:
-                live.update(self._live_group(state), refresh=True)
-                last_refresh = now
-
-        with live:
-            try:
-                result = generate(on_event)
-            finally:
-                # Rich forces `vertical_overflow="visible"` during Live.stop().
-                # Leave it a one-line final renderable so an exception or a
-                # very long response can never corrupt rows above the viewport.
-                live.update(Text(""), refresh=True)
-        self.final_generation(result, think=think)
-        return result
-
-    def final_generation(self, result: GenerationResult, *, think: bool) -> None:
-        if result.reasoning:
-            self.console.print(self.thinking_trace(result.reasoning))
-        elif think:
-            self.warning("The model returned no separate reasoning channel for this turn.")
-
-        answer = sanitize_terminal_text(result.answer)
-        if answer:
-            renderable = Markdown(answer, code_theme="monokai", hyperlinks=True)
-        else:
-            renderable = Text("No final answer was returned.", style="italic dim")
-        self.console.print(
-            self.chat_panel(
-                renderable,
-                title="[bright_cyan]◆ Answer[/bright_cyan]",
-                compact_bottom=True,
-                title_align="left",
-                border_style="bright_cyan",
-                box=box.ROUNDED,
-                padding=(0, 1),
-            )
-        )
-
-        if result.finish_reason == "length" and result.reasoning and not result.answer:
-            self.warning(
-                "The token limit was reached during reasoning. Try /max-tokens 8192 and retry."
-            )
-        metrics = [f"{result.elapsed:.1f}s"]
-        if result.first_token_seconds is not None:
-            metrics.append(f"TTFT {result.first_token_seconds:.1f}s")
-        if result.completion_tokens is not None:
-            metrics.append(f"{result.completion_tokens} tokens")
-        if result.tokens_per_second is not None:
-            metrics.append(f"{result.tokens_per_second:.1f} tok/s")
-        if result.finish_reason:
-            metrics.append(f"finish: {result.finish_reason}")
-        snapshot = resource_snapshot()
-        server = next(
-            (item for item in snapshot.processes if item.port == self.settings.port), None
-        )
-        if server is not None:
-            if server.cpu_percent is not None:
-                metrics.append(f"CPU {server.cpu_percent:.1f}%")
-            if server.memory_mib is not None:
-                metrics.append(f"RAM {server.memory_mib:,.0f} MiB")
-        self.generation_info(" · ".join(metrics))
-
-    def generation_info(self, value: str) -> None:
-        metadata = Text("    " + value, style="dim", no_wrap=True, overflow="ellipsis")
-        conversation = getattr(self, "_conversation", None)
-        if conversation is not None:
-            if conversation.popup_items is None or conversation.popup_preview:
-                metadata.end = "\n\n\n"
-            conversation.print_info(metadata)
-        else:
-            self.console.print(metadata)
 
     def help(self) -> None:
         table = Table(
@@ -998,13 +499,12 @@ class TerminalUI:
                 )
             table.add_row(cell, description)
         self.console.print(
-            self.chat_panel(table, marker=False, border_style="bright_cyan", box=box.ROUNDED)
+            self.chat_panel(
+                table,
+                marker=False,
+            )
         )
         self.generation_info(
             "// sends a literal slash · Esc+Enter adds a line\n"
             "F1 listen · F2 speak · F3 stop · Ctrl-C cancels"
         )
-
-
-def is_plain_terminal() -> bool:
-    return "NO_COLOR" in os.environ or os.environ.get("TERM") == "dumb"

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
 import threading
 import time
 from collections import deque
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from contextvars import ContextVar
 from weakref import WeakValueDictionary
 
@@ -35,6 +34,8 @@ from rich.spinner import Spinner
 from rich.style import Style
 from rich.text import Text
 
+from .errors import MlxChatError
+from .terminal import copy_text
 from .theme import ACCENT, CANVAS, MUTED, POPUP, SELECTION
 
 CONVERSATION_BACKGROUND = CANVAS
@@ -122,7 +123,6 @@ class ConversationView:
         self.ui = ui
         self.popup_items = None
         self.popup_preview = False
-        self._preview_version = 0
         self._preview_text = None
         self._output_capture = ContextVar("command_output", default=None)
         self.popup_title = ""
@@ -139,8 +139,7 @@ class ConversationView:
         self.follow = True
         self.offset = 0
         self.line_count = 0
-        self.busy = False
-        self.allow_input = False
+        self.mode = "input"
         self.submitted_inputs = deque()
         self.draft_text = ""
         self.audio_key = None
@@ -330,8 +329,15 @@ class ConversationView:
         ui.console.status = self.status
         session.placeholder = lambda: [("class:input-placeholder", self.composer_placeholder())]
 
+    @property
+    def busy(self):
+        return self.mode != "input"
+
+    @property
+    def allow_input(self):
+        return self.mode == "generation"
+
     def dismiss_preview(self):
-        self._preview_version += 1
         self._preview_text = None
         if self.popup_preview:
             self.popup_preview = False
@@ -339,46 +345,30 @@ class ConversationView:
             self.ui.prompt_session.app.invalidate()
 
     def on_input_changed(self, buffer):
+        from .commands import SLASH_COMMANDS
+
         app = self.ui.prompt_session.app
         if not app.is_running or self.popup_waiting or (self.busy and not self.allow_input):
             return
-        from .ui import SLASH_COMMANDS
-
         command = buffer.text.strip().lower()
         if command not in SLASH_COMMANDS or command in {"/voice", "/web", "/retry"}:
             self.dismiss_preview()
             return
-        if self._preview_text == command:
+        if command == self._preview_text:
             return
         self.dismiss_preview()
         self._preview_text = command
-        version = self._preview_version
         self.popup_preview = True
         self.popup_title = command
         self.popup_offset = 0
-        self.popup_items = [Text("Preparing…", style="dim")]
-
-        def apply(items):
-            if version != self._preview_version or not self.popup_preview:
-                return
-            self.popup_items = items
-            self._revision += 1
-            app.invalidate()
-
-        def collect():
-            items = []
-            token = self._output_capture.set(items)
-            try:
-                self.ui.command_previewer(command)
-            except Exception as exc:
-                items.append(Text(str(exc), style="dim"))
-            finally:
-                self._output_capture.reset(token)
-            if app.loop is not None and app.is_running:
-                with suppress(RuntimeError):
-                    app.loop.call_soon_threadsafe(apply, items)
-
-        threading.Thread(target=collect, daemon=True).start()
+        items = []
+        token = self._output_capture.set(items)
+        try:
+            self.ui.preview_command(command)
+        finally:
+            self._output_capture.reset(token)
+        self.popup_items = items
+        self._revision += 1
         app.invalidate()
 
     def composer_placeholder(self):
@@ -485,8 +475,8 @@ class ConversationView:
             text = self.selected_text()
             if text:
                 try:
-                    subprocess.run(["pbcopy"], input=text, text=True, check=True, timeout=2)
-                except (OSError, subprocess.SubprocessError):
+                    copy_text(text)
+                except MlxChatError:
                     self.ui.warning("Could not copy the selected text to the clipboard.")
         self.ui.prompt_session.app.invalidate()
 
@@ -694,10 +684,6 @@ class ConversationView:
             if user
             else self.ui.chat_panel(
                 spinner,
-                title="◆ System",
-                title_align="left",
-                border_style="bright_cyan",
-                padding=(0, 1),
             )
         )
         panel.renderable = self.ui.message_content(spinner, user=user)
@@ -843,7 +829,7 @@ class ConversationView:
 
     def run_native(self, operation):
         """Keep native inference on the caller thread; render the UI separately."""
-        self.busy = True
+        self.mode = "native"
         self.cancelled.clear()
         app = self.ui.prompt_session.app
         ready = threading.Event()
@@ -867,12 +853,11 @@ class ConversationView:
             if app.loop is not None:
                 app.loop.call_soon_threadsafe(app.exit, "")
             screen.join()
-            self.busy = False
+            self.mode = "input"
             self.update(None)
 
     def generate(self, generate, preview, *, allow_input=False):
-        self.busy = True
-        self.allow_input = allow_input
+        self.mode = "generation" if allow_input else "task"
         self.cancelled.clear()
         self.follow = True
         self.update(preview(None))
@@ -886,7 +871,7 @@ class ConversationView:
             if self.cancelled.is_set():
                 raise KeyboardInterrupt
             now = time.monotonic()
-            if now - last_preview >= 1 / 30:
+            if now - last_preview >= 0.1:
                 self.update(preview(result))
                 last_preview = now
 
@@ -910,9 +895,9 @@ class ConversationView:
             if allow_input:
                 self.draft_text = self.ui.prompt_session.default_buffer.text
             self.cancelled.set()
-            thread.join()
-            self.busy = False
-            self.allow_input = False
+            if thread.ident is not None:
+                thread.join()
+            self.mode = "input"
             self.update(None)
         if not outcome[0][0]:
             raise outcome[0][1]

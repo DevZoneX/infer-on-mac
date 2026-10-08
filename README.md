@@ -36,6 +36,14 @@ chmod +x setup.sh mlx-chat
 ./setup.sh
 ```
 
+The default install is text-only. Add optional features when you need them:
+
+```bash
+./setup.sh --voice       # microphone input and speech output
+./setup.sh --web         # /web search
+./setup.sh --voice --web # both
+```
+
 The installer adds `mlx-chat` to `~/.local/bin`. If it is not immediately
 available in a new terminal, restart that terminal or add `~/.local/bin` to
 your `PATH`.
@@ -47,10 +55,10 @@ uv sync --locked --python 3.11
 uv run --no-sync mlx-chat small
 ```
 
-For development (including optional audio tests):
+For development with all optional features:
 
 ```bash
-uv sync --locked --python 3.11 --extra dev --extra voice
+uv sync --locked --python 3.11 --extra dev --extra voice --extra web
 ```
 
 ## Start chatting
@@ -68,6 +76,9 @@ The conversation stays in a scrollable view above the fixed input box.
 Scroll with the mouse wheel or Page Up / Page Down. Scrolling up pauses automatic
 following while an answer streams; return to the bottom or press Ctrl+End to
 follow new text again.
+
+Use `mlx-chat medium --plain` for a simpler terminal experience. It prints each
+completed response once, without animated rendering or the full-screen view.
 
 Type a question and press Enter. The first launch can take a while because it
 downloads and loads the model. Later launches reuse the local model server when
@@ -119,11 +130,11 @@ The built-in default remains `mlx-community/Qwen3-4B-4bit` when no model is spec
 
 ## Speak instead of typing
 
-Voice input is fully local and is installed by `./setup.sh`. If you set up the
-environment yourself, install its dependencies once:
+Voice input is fully local and optional. Install it with `./setup.sh --voice`,
+or add the dependencies to your environment:
 
 ```bash
-uv sync --extra dev --extra voice
+uv sync --extra voice
 brew install ffmpeg
 ```
 
@@ -136,10 +147,15 @@ Then, in chat:
 
 On MacBooks where function keys control hardware, hold `Fn` when pressing `F1`–`F3`.
 
-Voice uses `mlx-community/whisper-large-v3-turbo`, which loads when chat starts
-so the first voice prompt is ready. Its loading is shown cleanly in the startup
-flow and its ready state appears in the chat panel. macOS may ask for microphone
-permission. Audio and transcription stay on the Mac.
+Voice uses `mlx-community/whisper-large-v3-turbo`, which loads on the first voice
+prompt by default. Text chat starts without loading Whisper. The first
+transcription can take longer while its model downloads or loads.
+
+To have voice ready at startup, use `mlx-chat medium --preload-voice`, or save
+that preference with `mlx-chat config set preload-voice on`. Use
+`--no-preload-voice` to override the saved preference. Its ready state appears
+in the chat panel. macOS may ask for microphone permission. Audio and
+transcription stay on the Mac.
 
 ## Hear model answers
 
@@ -182,13 +198,21 @@ Every completed response includes elapsed time, time-to-first-token, throughput,
 and the active server's CPU and RAM use. Markdown and links render while the
 response streams.
 
+Loading a session displays its saved turns and restores the latest answer for
+`/speak` and `/stats`. `/undo` restores the preceding answer and updates the
+display. Historical responses show their saved generation metrics, without
+attaching the server's current CPU or RAM use.
+
+Ctrl-C cancels generation even while the server is loading a response or has
+stopped sending tokens. Any answer text received so far is retained.
+
 ## Commands
 
 Type `/help` in chat for the same guide.
 
 | Command | Purpose |
 | --- | --- |
-| `/web QUERY` | Search the web explicitly, then answer with linked citations. |
+| `/web QUERY` | Search the web explicitly, then answer with linked citations (requires the `web` extra). |
 | `/think [on\|off\|toggle]` | Control reasoning mode. |
 | `/concise [on\|off\|toggle]` | Prefer short, direct answers and skip thinking. |
 | `/voice [SECONDS]` | Record a local voice prompt; default maximum is 30 seconds. |
@@ -212,7 +236,16 @@ Generate once without entering chat:
 ```bash
 mlx-chat run "Explain unified memory in three sentences."
 mlx-chat run "Write a release checklist." --json
+mlx-chat run "Explain how this works briefly." --concise
 ```
+
+One-off prompts use the same default or custom system prompt as interactive chat.
+`--concise` requests a brief answer and skips thinking, including when thinking is
+enabled in saved settings.
+
+Add `--ephemeral` to `chat` or `run` to stop a server started by that invocation
+when it exits. In interactive chat this also covers a replacement server started
+by `/model` or `/restart`. Reused and external servers are left running.
 
 Run an OpenAI-compatible local server without the chat UI:
 
@@ -253,6 +286,30 @@ The command-line model wins over `MLX_CHAT_MODEL`, which wins over saved
 configuration. `mlx-chat config path` shows where settings are stored, and
 `mlx-chat config reset` restores defaults. Use `mlx-chat COMMAND --help` for
 the complete command-line reference.
+
+### Long conversations and timeouts
+
+`--context-tokens` sets a context budget (default: 32768). The app reserves
+`--max-tokens` for output and an allowance for the chat template. It then keeps
+system instructions and the most recent complete turns that fit. Older turns
+are omitted only from the request; the full transcript remains available for
+saving and exporting. The UI tells you when this happens.
+
+The budget uses a conservative UTF-8 byte estimate, rather than loading a model
+tokenizer. It can retain fewer turns than an exact tokenizer would, and template
+overhead varies by model. Set the budget at or below your model's supported
+context size. An oversized latest prompt or system prompt produces a clear
+error instead of being silently shortened.
+
+```bash
+mlx-chat medium --context-tokens 32768 --max-tokens 4096
+mlx-chat config set context-tokens 32768
+```
+
+`--connect-timeout` bounds connection establishment (default: 10 seconds).
+`--request-timeout` controls inactivity while waiting for response headers or
+stream data (default: 3600 seconds). They can also be set through `config set`.
+Cancellation does not wait for either timeout to expire.
 
 ## Where data lives
 
@@ -300,6 +357,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [the source guide](src/README.md), and
 [the test guide](tests/README.md). GitHub Actions runs lint, formatting, tests,
 and package builds for text-only and audio installations on Apple Silicon macOS.
 Tests never download inference models or use real microphones/playback.
+Integration tests use a localhost HTTP fixture and harmless dummy child
+processes to verify streaming, cancellation, CLI behavior, and server ownership.
+Demo media stays in the repository and is excluded from package archives.
 
 The application is [MIT licensed](LICENSE). Downloaded models and third-party
 dependencies have their own licenses; review them before redistributing weights.

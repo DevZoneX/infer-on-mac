@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from mlx_chat import web
@@ -27,7 +30,7 @@ def fake_ddgs(monkeypatch):
     FakeDDGS.results = []
     FakeDDGS.error = None
     FakeDDGS.calls = []
-    monkeypatch.setattr(web, "DDGS", FakeDDGS)
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
 
 
 def test_search_normalizes_filters_deduplicates_and_limits_results():
@@ -77,4 +80,10 @@ def test_search_rejects_oversized_query_and_empty_results():
     with pytest.raises(MlxChatError, match="at most 500"):
         web.WebSearcher(Settings()).search("x" * 501)
     with pytest.raises(MlxChatError, match="no usable results"):
+        web.WebSearcher(Settings()).search("query")
+
+
+def test_missing_optional_search_dependency_has_install_instructions(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ddgs", None)
+    with pytest.raises(MlxChatError, match="uv sync --extra web"):
         web.WebSearcher(Settings()).search("query")

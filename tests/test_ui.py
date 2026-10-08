@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import io
-import time
 
 import pytest
 from rich.console import Console
 from rich.text import Text
 
 from mlx_chat.client import GenerationResult, StreamEvent
-from mlx_chat.ui import RenderState, TerminalUI, sanitize_terminal_text, short_model
+from mlx_chat.ui import TerminalUI, sanitize_terminal_text, short_model
 
 
 class TTYBuffer(io.StringIO):
@@ -38,102 +37,26 @@ def test_clear_erases_scrollback_and_visible_terminal():
     assert output.getvalue() == "\x1b[3J\x1b[H\x1b[2J"
 
 
-@pytest.mark.parametrize("height", [3, 4, 6, 7, 10, 24])
-def test_live_preview_never_exceeds_terminal_height_and_follows_tail(height):
-    output = io.StringIO()
+def test_plain_generation_renders_completed_response_once_without_live_ui(monkeypatch):
+    monkeypatch.setattr("rich.live.Live", lambda *a, **kw: pytest.fail("No live UI in plain mode"))
     ui = object.__new__(TerminalUI)
-    ui.console = Console(
-        file=output,
-        width=42,
-        height=height,
-        force_terminal=False,
-        color_system=None,
-    )
-    result = GenerationResult(
-        reasoning="EARLY-REASONING\n" + "reasoning text " * 100 + "\nLATE-REASONING",
-        answer="EARLY-ANSWER\n" + "answer text " * 100 + "\nLATE-ANSWER",
-    )
-
-    ui.console.print(
-        ui._live_group(RenderState(result, True, time.monotonic())),
-        end="",
-    )
-    rendered = output.getvalue()
-    rendered_height = rendered.count("\n") + int(bool(rendered and not rendered.endswith("\n")))
-
-    assert rendered_height <= height
-    assert "EARLY-ANSWER" not in rendered
-    assert "LATE-ANSWER" in rendered
-    if height >= 7:
-        assert "LATE-REASONING" in rendered
-
-
-def test_live_renderer_is_bounded_and_cleared_before_exit(monkeypatch):
-    instances = []
     final = []
-
-    class FakeLive:
-        def __init__(self, renderable, **options):
-            self.options = options
-            self.updates = [renderable]
-            instances.append(self)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def update(self, renderable, *, refresh):
-            assert refresh is True
-            self.updates.append(renderable)
-
-    monkeypatch.setattr("rich.live.Live", FakeLive)
-    ui = object.__new__(TerminalUI)
-    ui.console = Console(file=io.StringIO(), width=40, height=8, force_terminal=False)
-    ui.final_generation = lambda result, *, think: final.append((result, think))
+    ui.final_generation = lambda result, **kw: final.append(result)
+    result = GenerationResult(answer="Completed answer")
 
     def generate(callback):
-        result = GenerationResult(answer="complete answer")
-        callback(StreamEvent("content", text="complete answer"), result)
+        callback(StreamEvent("content", text="Partial"), result)
         return result
 
-    result = ui.render_generation(generate, think=True)
-
-    live = instances[0]
-    assert live.options["vertical_overflow"] == "ellipsis"
-    assert live.options["auto_refresh"] is False
-    assert isinstance(live.updates[-1], Text)
-    assert live.updates[-1].plain == ""
-    assert final == [(result, True)]
+    assert ui.render_generation(generate, think=False) is result
+    assert final == [result]
 
 
-def test_live_renderer_is_cleared_when_generation_is_interrupted(monkeypatch):
-    updates = []
-
-    class FakeLive:
-        def __init__(self, renderable, **_options):
-            updates.append(renderable)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def update(self, renderable, *, refresh):
-            assert refresh is True
-            updates.append(renderable)
-
-    monkeypatch.setattr("rich.live.Live", FakeLive)
+def test_plain_generation_propagates_errors_without_output():
     ui = object.__new__(TerminalUI)
-    ui.console = Console(file=io.StringIO(), width=40, height=8, force_terminal=False)
-
+    ui.final_generation = lambda *a, **kw: pytest.fail("Do not render a failed response")
     with pytest.raises(KeyboardInterrupt):
-        ui.render_generation(lambda _callback: (_ for _ in ()).throw(KeyboardInterrupt), think=True)
-
-    assert isinstance(updates[-1], Text)
-    assert updates[-1].plain == ""
+        ui.render_generation(lambda cb: (_ for _ in ()).throw(KeyboardInterrupt), think=False)
 
 
 @pytest.mark.parametrize(
@@ -251,51 +174,6 @@ def test_escape_stops_server_and_escape_enter_still_inserts_newline(monkeypatch,
         assert results == ["/stop"]
 
 
-def test_streaming_answer_starts_small_and_grows_to_viewport():
-    ui = object.__new__(TerminalUI)
-    ui.console = Console(file=io.StringIO(), width=50, height=24, color_system=None)
-    heights = []
-    for answer in ("Hello", "\n\n".join(f"Line {i}" for i in range(6)), "long text " * 500):
-        group = ui._live_group(
-            RenderState(GenerationResult(answer=answer), False, time.monotonic())
-        )
-        lines = ui.console.render_lines(group, ui.console.options)
-        heights.append(len(lines))
-    assert heights[0] == 4
-    assert heights[0] < heights[1] < heights[2]
-    assert heights[2] <= 24
-
-
-def test_generation_keeps_user_box_below_answer_and_within_screen():
-    ui = object.__new__(TerminalUI)
-    ui._interactive_prompt = True
-    output = io.StringIO()
-    ui.console = Console(file=output, width=50, height=24, color_system=None)
-    group = ui._live_group(
-        RenderState(
-            GenerationResult(answer="word " * 500, reasoning="thinking " * 300),
-            True,
-            time.monotonic(),
-        )
-    )
-    ui.console.print(group)
-    rendered = output.getvalue()
-    assert "Answer" not in rendered
-    assert "You" not in rendered
-    assert "◆" in rendered
-    assert "Generating…" in rendered
-    assert rendered.count("\n") <= 24
-
-
-def test_bottom_anchor_reserves_rows_without_clearing_history():
-    ui = object.__new__(TerminalUI)
-    ui._interactive_prompt = True
-    output = io.StringIO()
-    ui.console = Console(file=output, width=50, height=24)
-    ui._anchor_bottom()
-    assert output.getvalue() == "\x1b[24;1H\n\n\n\n\x1b[21;1H"
-
-
 @pytest.mark.parametrize(
     ("think", "concise", "expected"),
     [(False, False, "off"), (True, False, "on"), (True, True, "off")],
@@ -341,9 +219,9 @@ def test_thinking_spinner_animates_and_label_remains_clickable(monkeypatch):
     trace = ThinkingTrace("A thought")
     trace.loading = True
     console = Console(file=io.StringIO(), width=80)
-    monkeypatch.setattr("mlx_chat.ui.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr("mlx_chat.rendering.time.monotonic", lambda: 100.0)
     first = console.render_lines(trace, console.options, pad=False)
-    monkeypatch.setattr("mlx_chat.ui.time.monotonic", lambda: 100.2)
+    monkeypatch.setattr("mlx_chat.rendering.time.monotonic", lambda: 100.2)
     second = console.render_lines(trace, console.options, pad=False)
     first_text = "".join(segment.text for line in first for segment in line)
     second_text = "".join(segment.text for line in second for segment in line)
@@ -415,7 +293,7 @@ def test_composer_copy_preserves_selection_and_cut_paste_use_clipboard(monkeypat
             return SimpleNamespace()
         return SimpleNamespace(stdout=clipboard[-1])
 
-    monkeypatch.setattr("mlx_chat.ui.subprocess.run", clipboard_command)
+    monkeypatch.setattr("mlx_chat.terminal.subprocess.run", clipboard_command)
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         ui = TerminalUI(Settings())
         ui.enable_conversation()

@@ -71,6 +71,14 @@ def test_registry_reader_tolerates_corruption_and_skips_bad_records():
     assert server._read_registry_unlocked() == [good]
 
 
+@pytest.mark.parametrize("servers", [None, 42, "invalid", {"pid": 20}])
+def test_registry_reader_tolerates_invalid_servers_container(servers):
+    server.registry_path().parent.mkdir(parents=True)
+    server.registry_path().write_text(json.dumps({"servers": servers}), encoding="utf-8")
+
+    assert server._read_registry_unlocked() == []
+
+
 def test_list_records_prunes_stale_or_recycled_pids(monkeypatch):
     live = record(20)
     stale = record(21, port=8081)

@@ -24,8 +24,8 @@ jobs:
         run: uv sync --locked --extra dev
       - name: Install with audio dependencies
         if: ${{ matrix.voice }}
-        run: uv sync --locked --extra dev --extra voice
+        run: uv sync --locked --extra dev --extra voice --extra web
       - run: uv run --no-sync ruff check src tests
       - run: uv run --no-sync ruff format --check src tests
-      - run: uv run --no-sync pytest
       - run: uv build
+      - run: uv run --no-sync pytest

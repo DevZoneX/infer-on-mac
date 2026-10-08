@@ -4,13 +4,25 @@ set -eu
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$PROJECT_DIR"
 
+INSTALL_EXTRAS=""
+for option in "$@"; do
+  case "$option" in
+    --voice) INSTALL_EXTRAS="${INSTALL_EXTRAS:+$INSTALL_EXTRAS,}voice" ;;
+    --web) INSTALL_EXTRAS="${INSTALL_EXTRAS:+$INSTALL_EXTRAS,}web" ;;
+    *) echo "Usage: ./setup.sh [--voice] [--web]" >&2; exit 2 ;;
+  esac
+done
+
 if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   echo "mlx-chat requires an Apple Silicon Mac (arm64)." >&2
   exit 1
 fi
 
 if command -v uv >/dev/null 2>&1; then
-  uv sync --python 3.11 --extra voice
+  set -- --locked --python 3.11
+  case ",$INSTALL_EXTRAS," in *,voice,*) set -- "$@" --extra voice ;; esac
+  case ",$INSTALL_EXTRAS," in *,web,*) set -- "$@" --extra web ;; esac
+  uv sync "$@"
 else
   PYTHON_BIN=${PYTHON_BIN:-python3}
   "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' || {
@@ -19,7 +31,7 @@ else
   }
   "$PYTHON_BIN" -m venv .venv
   .venv/bin/python -m pip install --upgrade pip
-  .venv/bin/python -m pip install -e '.[voice]'
+  .venv/bin/python -m pip install -e ".${INSTALL_EXTRAS:+[$INSTALL_EXTRAS]}"
 fi
 
 BIN_DIR=${MLX_CHAT_BIN_DIR:-"$HOME/.local/bin"}

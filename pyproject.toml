@@ -11,13 +11,13 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "infer-on-macos contributors" }]
 dependencies = [
-  "ddgs>=9.16,<10",
   "mlx-lm>=0.32.0,<0.33",
   "prompt-toolkit>=3.0.52,<4",
   "rich>=14.1,<15",
 ]
 
 [project.optional-dependencies]
+web = ["ddgs>=9.16,<10"]
 voice = [
   "kokoro-mlx[audio]>=0.1.2,<0.2",
   "mlx-whisper>=0.4",
@@ -35,6 +35,9 @@ mlx-chat = "mlx_chat.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mlx_chat"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/assets"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

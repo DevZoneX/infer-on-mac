@@ -32,9 +32,7 @@ def preload_transcription_model(model: str = DEFAULT_TRANSCRIPTION_MODEL) -> Non
         from huggingface_hub.utils import disable_progress_bars
         from mlx_whisper.transcribe import ModelHolder
     except ImportError as exc:
-        raise MlxChatError(
-            "Voice support is not installed. Run `uv sync --extra dev --extra voice`."
-        ) from exc
+        raise MlxChatError("Voice support is not installed. Run `uv sync --extra voice`.") from exc
     # Keep Hugging Face's raw progress bar out of the Rich terminal UI; the
     # caller presents a single loading status instead.
     disable_progress_bars()
@@ -126,8 +124,12 @@ def transcribe_audio(audio, *, model: str = DEFAULT_TRANSCRIPTION_MODEL) -> str:
     try:
         import mlx_whisper
         import soundfile as sf
+        from huggingface_hub.utils import disable_progress_bars
     except ImportError as exc:
         raise MlxChatError("Voice support is not installed. Run `uv sync --extra voice`.") from exc
+    # Lazy loading must keep download progress out of the live transcription UI,
+    # just as startup preloading does.
+    disable_progress_bars()
     sample_rate = 16_000
     with tempfile.NamedTemporaryFile(
         prefix="mlx-chat-voice-", suffix=".wav", delete=False

@@ -24,9 +24,9 @@ from rich.table import Table
 from rich.text import Text
 
 from . import DEFAULT_MODEL, MODEL_PRESETS, __version__, resolve_model_preset
-from .chat import ChatApp
 from .client import ChatClient
 from .config import Settings, config_path, load_settings, save_settings
+from .context import select_context, system_messages
 from .errors import ApiError, MlxChatError, ServerUnavailableError
 from .server import (
     ServerManager,
@@ -40,7 +40,8 @@ from .server import (
     stop_record,
     tail_log,
 )
-from .ui import StartupStatus, is_plain_terminal, sanitize_terminal_text, short_model
+from .startup import StartupStatus
+from .terminal import is_plain_terminal, sanitize_terminal_text, short_model
 
 COMMANDS = {
     "chat",
@@ -90,6 +91,8 @@ def add_runtime_options(parser: argparse.ArgumentParser, *, positional_model: bo
     parser.add_argument("--system", dest="system_prompt", help="System prompt")
     parser.add_argument("--startup-timeout", type=int, help="Server startup timeout in seconds")
     parser.add_argument("--request-timeout", type=int, help="Generation timeout in seconds")
+    parser.add_argument("--connect-timeout", type=int, help="Connection timeout in seconds")
+    parser.add_argument("--context-tokens", type=int, help="Model context budget (default: 32768)")
     parser.add_argument(
         "--mlx-arg",
         action="append",
@@ -126,7 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--session", help="Load or create an auto-saved session")
     chat.add_argument("--ephemeral", action="store_true", help="Stop the server when chat exits")
     chat.add_argument("--attach", action="store_true", help="Require an already-running server")
-    chat.add_argument("--plain", action="store_true", help="Disable terminal colors")
+    chat.add_argument(
+        "--plain", action="store_true", help="Show completed responses without a live UI"
+    )
+    chat.add_argument(
+        "--preload-voice",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Load Whisper at startup instead of on first voice input",
+    )
 
     run = subparsers.add_parser("run", help="Run one prompt and exit")
     run.add_argument("prompt", help="Prompt text, or - to read standard input")
@@ -200,16 +211,6 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
     if model:
         model = resolve_model_preset(model)
     server_args = getattr(args, "mlx_arg", None)
-    if server_args is not None:
-        forbidden = {"--model", "--host", "--port"}
-        for item in server_args:
-            flag = item.split("=", 1)[0]
-            if flag in {"-m", "-p"} or any(
-                lifecycle_flag.startswith(flag) for lifecycle_flag in forbidden
-            ):
-                raise MlxChatError(
-                    f"{flag} must use mlx-chat's own option so lifecycle state stays accurate."
-                )
     settings = settings.merged(
         model=model,
         host=getattr(args, "host", None),
@@ -224,6 +225,9 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         system_prompt=getattr(args, "system_prompt", None),
         startup_timeout=getattr(args, "startup_timeout", None),
         request_timeout=getattr(args, "request_timeout", None),
+        connect_timeout=getattr(args, "connect_timeout", None),
+        context_tokens=getattr(args, "context_tokens", None),
+        preload_voice=getattr(args, "preload_voice", None),
         server_args=server_args,
     )
     if settings.host not in LOOPBACK_HOSTS and not getattr(args, "allow_network", False):
@@ -361,6 +365,8 @@ def ensure_server(
 
 
 def run_chat(args: argparse.Namespace) -> int:
+    from .chat import ChatApp
+
     settings = settings_from_args(args)
     plain = args.plain or is_plain_terminal()
     console = Console(no_color=plain)
@@ -377,14 +383,14 @@ def run_chat(args: argparse.Namespace) -> int:
             session_name=args.session,
             plain=plain,
         )
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         _stop_new_server(settings, result, grace=2)
         raise
     try:
         return app.run()
     finally:
         if args.ephemeral:
-            _stop_new_server(settings, result)
+            _stop_new_server(settings, app.start_result)
 
 
 def run_once(args: argparse.Namespace) -> int:
@@ -392,6 +398,9 @@ def run_once(args: argparse.Namespace) -> int:
     prompt = sys.stdin.read() if args.prompt == "-" else args.prompt
     if not prompt.strip():
         raise MlxChatError("Prompt cannot be empty.")
+    messages = system_messages(settings)
+    messages.append({"role": "user", "content": prompt})
+    messages = select_context(messages, settings).messages
     console = Console(stderr=True)
     result_info = ensure_server(
         settings,
@@ -401,11 +410,7 @@ def run_once(args: argparse.Namespace) -> int:
     )
     try:
         client = ChatClient(settings)
-        messages = []
-        if settings.system_prompt:
-            messages.append({"role": "system", "content": settings.system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        result = client.collect(messages, think=settings.think)
+        result = client.collect(messages, think=settings.think and not settings.concise)
         if args.json:
             print(
                 json.dumps(
@@ -750,7 +755,7 @@ def run_config(args: argparse.Namespace) -> int:
     settings = load_settings()
     if command == "set":
         key = args.key.replace("-", "_")
-        if not hasattr(settings, key):
+        if key not in asdict(settings):
             valid = ", ".join(sorted(asdict(settings)))
             raise MlxChatError(f"Unknown setting {args.key!r}. Valid keys: {valid}")
         value = parse_config_value(getattr(settings, key), args.value)

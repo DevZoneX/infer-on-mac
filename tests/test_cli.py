@@ -114,3 +114,98 @@ def test_persisted_non_loopback_setting_is_also_guarded(monkeypatch):
 
     with pytest.raises(MlxChatError, match="--allow-network"):
         cli.settings_from_args(parse_runtime())
+
+
+@pytest.mark.parametrize("key", ["base-url", "merged", "validate"])
+def test_config_set_rejects_attributes_that_are_not_settings(monkeypatch, key):
+    monkeypatch.setattr(cli, "load_settings", Settings)
+    monkeypatch.setattr(cli, "save_settings", lambda _settings: pytest.fail("Must not save"))
+    args = parse_runtime("config", "set", key, "invalid")
+
+    with pytest.raises(MlxChatError, match="Unknown setting"):
+        cli.run_config(args)
+
+
+@pytest.mark.parametrize("system_prompt", ["", "Custom instructions"])
+def test_run_once_honors_concise_mode_and_system_prompt(monkeypatch, system_prompt):
+    from mlx_chat.client import GenerationResult
+    from mlx_chat.context import CONCISE_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+
+    settings = Settings(think=True, concise=True, system_prompt=system_prompt)
+    requests = []
+    monkeypatch.setattr(cli, "settings_from_args", lambda _args: settings)
+    monkeypatch.setattr(cli, "ensure_server", lambda *_args, **_kwargs: None)
+
+    class FakeClient:
+        def __init__(self, _settings):
+            pass
+
+        def collect(self, messages, *, think):
+            requests.append((messages, think))
+            return GenerationResult(answer="Brief answer")
+
+    monkeypatch.setattr(cli, "ChatClient", FakeClient)
+
+    assert cli.run_once(parse_runtime("run", "hello", "--concise")) == 0
+    assert requests == [
+        (
+            [
+                {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+                {"role": "system", "content": CONCISE_SYSTEM_PROMPT},
+                {"role": "user", "content": "hello"},
+            ],
+            False,
+        )
+    ]
+
+
+def test_new_runtime_options_override_saved_configuration(monkeypatch):
+    monkeypatch.setattr(cli, "load_settings", lambda: Settings(preload_voice=True))
+    settings = cli.settings_from_args(
+        parse_runtime(
+            "--context-tokens",
+            "8192",
+            "--max-tokens",
+            "512",
+            "--connect-timeout",
+            "3",
+            "--no-preload-voice",
+        )
+    )
+    assert settings.context_tokens == 8192
+    assert settings.connect_timeout == 3
+    assert settings.max_tokens == 512
+    assert settings.preload_voice is False
+
+
+def test_oversized_one_off_prompt_is_rejected_before_server_start(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "settings_from_args",
+        lambda _args: Settings(
+            system_prompt="small",
+            context_tokens=600,
+            max_tokens=100,
+        ),
+    )
+    monkeypatch.setattr(cli, "ensure_server", lambda *a, **kw: pytest.fail("Must not start"))
+    with pytest.raises(MlxChatError, match="context budget"):
+        cli.run_once(parse_runtime("run", "x" * 1000))
+
+
+def test_cli_import_does_not_load_optional_backends():
+    import json
+    import subprocess
+    import sys
+
+    program = (
+        "import sys,json; import mlx_chat.cli; "
+        "print(json.dumps([name for name in "
+        "('ddgs', 'mlx_whisper', 'kokoro_mlx', 'mlx.core', 'torch', 'mlx_chat.ui', "
+        "'prompt_toolkit') if name in sys.modules]))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == []

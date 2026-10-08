@@ -1229,7 +1229,6 @@ name = "mlx-chat-terminal"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "ddgs" },
     { name = "mlx-lm" },
     { name = "prompt-toolkit" },
     { name = "rich" },
@@ -1248,10 +1247,13 @@ voice = [
     { name = "sounddevice" },
     { name = "soundfile" },
 ]
+web = [
+    { name = "ddgs" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "ddgs", specifier = ">=9.16,<10" },
+    { name = "ddgs", marker = "extra == 'web'", specifier = ">=9.16,<10" },
     { name = "kokoro-mlx", extras = ["audio"], marker = "extra == 'voice'", specifier = ">=0.1.2,<0.2" },
     { name = "mlx-lm", specifier = ">=0.32.0,<0.33" },
     { name = "mlx-whisper", marker = "extra == 'voice'", specifier = ">=0.4" },
@@ -1263,7 +1265,7 @@ requires-dist = [
     { name = "sounddevice", marker = "extra == 'voice'", specifier = ">=0.5" },
     { name = "soundfile", marker = "extra == 'voice'", specifier = ">=0.12" },
 ]
-provides-extras = ["voice", "dev"]
+provides-extras = ["web", "voice", "dev"]
 
 [[package]]
 name = "mlx-lm"

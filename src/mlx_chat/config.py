@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -33,6 +34,7 @@ class Settings:
     port: int = 8080
     think: bool = False
     concise: bool = False
+    preload_voice: bool = False
     temperature: float = 0.7
     top_p: float = 0.8
     top_k: int = 20
@@ -42,6 +44,8 @@ class Settings:
     system_prompt: str = ""
     startup_timeout: int = 900
     request_timeout: int = 3600
+    connect_timeout: int = 10
+    context_tokens: int = 32768
     web_results: int = 5
     web_timeout: int = 10
     web_region: str = "us-en"
@@ -54,67 +58,50 @@ class Settings:
         self.validate()
 
     def validate(self) -> None:
-        if not isinstance(self.model, str) or not self.model.strip():
-            raise MlxChatError("Model name cannot be empty.")
-        if not isinstance(self.host, str) or not self.host.strip():
-            raise MlxChatError("Host cannot be empty.")
-        if isinstance(self.port, bool) or not isinstance(self.port, int):
-            raise MlxChatError("Port must be an integer between 1 and 65535.")
-        if not 1 <= self.port <= 65535:
-            raise MlxChatError("Port must be between 1 and 65535.")
-        if not isinstance(self.think, bool):
-            raise MlxChatError("think must be a boolean.")
-        if not isinstance(self.concise, bool):
-            raise MlxChatError("concise must be a boolean.")
-        if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
-            raise MlxChatError("Temperature must be a number between 0 and 5.")
-        if not 0 <= self.temperature <= 5:
-            raise MlxChatError("Temperature must be between 0 and 5.")
-        if isinstance(self.top_p, bool) or not isinstance(self.top_p, (int, float)):
-            raise MlxChatError("top_p must be a number between 0 and 1.")
-        if not 0 <= self.top_p <= 1:
-            raise MlxChatError("top_p must be between 0 and 1.")
-        if isinstance(self.top_k, bool) or not isinstance(self.top_k, int):
-            raise MlxChatError("top_k must be a non-negative integer.")
-        if self.top_k < 0:
-            raise MlxChatError("top_k cannot be negative.")
-        if isinstance(self.min_p, bool) or not isinstance(self.min_p, (int, float)):
-            raise MlxChatError("min_p must be a number between 0 and 1.")
-        if not 0 <= self.min_p <= 1:
-            raise MlxChatError("min_p must be between 0 and 1.")
-        if isinstance(self.max_tokens, bool) or not isinstance(self.max_tokens, int):
-            raise MlxChatError("max_tokens must be a positive integer.")
-        if self.max_tokens < 1:
-            raise MlxChatError("max_tokens must be at least 1.")
-        if isinstance(self.repetition_penalty, bool) or not isinstance(
-            self.repetition_penalty, (int, float)
-        ):
-            raise MlxChatError("repetition_penalty must be a non-negative number.")
-        if self.repetition_penalty < 0:
-            raise MlxChatError("repetition_penalty cannot be negative.")
-        if (
-            isinstance(self.startup_timeout, bool)
-            or not isinstance(self.startup_timeout, int)
-            or isinstance(self.request_timeout, bool)
-            or not isinstance(self.request_timeout, int)
-        ):
-            raise MlxChatError("Timeouts must be positive integers.")
-        if self.startup_timeout < 1 or self.request_timeout < 1:
-            raise MlxChatError("Timeouts must be positive.")
-        if isinstance(self.web_results, bool) or not isinstance(self.web_results, int):
-            raise MlxChatError("web_results must be an integer between 1 and 10.")
-        if not 1 <= self.web_results <= 10:
-            raise MlxChatError("web_results must be between 1 and 10.")
-        if isinstance(self.web_timeout, bool) or not isinstance(self.web_timeout, int):
-            raise MlxChatError("web_timeout must be an integer between 1 and 60.")
-        if not 1 <= self.web_timeout <= 60:
-            raise MlxChatError("web_timeout must be between 1 and 60 seconds.")
-        if not isinstance(self.web_region, str) or not self.web_region.strip():
-            raise MlxChatError("web_region cannot be empty.")
+        for key in ("model", "host", "web_region", "system_prompt", "web_safesearch"):
+            value = getattr(self, key)
+            if not isinstance(value, str) or (key != "system_prompt" and not value.strip()):
+                label = {"model": "Model name", "host": "Host"}.get(key, key)
+                raise MlxChatError(f"{label} must be non-empty text.")
+        for key in ("think", "concise", "preload_voice"):
+            if not isinstance(getattr(self, key), bool):
+                raise MlxChatError(f"{key} must be a boolean.")
+        numbers = {
+            "port": ("Port", int, 1, 65535),
+            "temperature": ("Temperature", (int, float), 0, 5),
+            "top_p": ("top_p", (int, float), 0, 1),
+            "top_k": ("top_k", int, 0, None),
+            "min_p": ("min_p", (int, float), 0, 1),
+            "max_tokens": ("max_tokens", int, 1, None),
+            "repetition_penalty": ("repetition_penalty", (int, float), 0, None),
+            "startup_timeout": ("Timeouts", int, 1, None),
+            "request_timeout": ("Timeouts", int, 1, None),
+            "connect_timeout": ("connect_timeout", int, 1, None),
+            "context_tokens": ("context_tokens", int, 1, None),
+            "web_results": ("web_results", int, 1, 10),
+            "web_timeout": ("web_timeout", int, 1, 60),
+        }
+        for key, (label, kind, minimum, maximum) in numbers.items():
+            value = getattr(self, key)
+            if isinstance(value, bool) or not isinstance(value, kind):
+                raise MlxChatError(
+                    f"{label} must be an integer." if kind is int else f"{label} must be a number."
+                )
+            if (
+                (isinstance(value, float) and not math.isfinite(value))
+                or value < minimum
+                or (maximum is not None and value > maximum)
+            ):
+                limit = (
+                    f"between {minimum} and {maximum}"
+                    if maximum is not None
+                    else (f"at least {minimum}")
+                )
+                raise MlxChatError(f"{label} must be finite and {limit}.")
+        if self.context_tokens <= self.max_tokens + 256:
+            raise MlxChatError("context_tokens must exceed max_tokens by more than 256 tokens.")
         if self.web_safesearch not in {"on", "moderate", "off"}:
             raise MlxChatError("web_safesearch must be on, moderate, or off.")
-        if not isinstance(self.system_prompt, str):
-            raise MlxChatError("system_prompt must be text.")
         if not isinstance(self.server_args, list) or not all(
             isinstance(item, str) for item in self.server_args
         ):

@@ -7,12 +7,13 @@ import json
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 from .config import Settings
 from .errors import ApiError, ServerUnavailableError
+from .transport import StreamingResponse
 
 
 @dataclass
@@ -183,15 +184,34 @@ class ChatClient:
         messages: list[dict[str, str]],
         *,
         think: bool,
+        cancel_event: Any = None,
     ) -> Iterator[StreamEvent]:
         splitter = ThinkTagSplitter()
         native_reasoning = False
         saw_done = False
         payload = self.payload(messages, think=think, stream=True)
-        with self._request("/v1/chat/completions", payload) as response:
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+            method="POST",
+        )
+        with StreamingResponse(
+            request,
+            timeout=self.settings.request_timeout,
+            connect_timeout=self.settings.connect_timeout,
+            cancel_event=cancel_event,
+        ) as response:
             content_type = response.headers.get("Content-Type", "")
             if response.status != 200:
-                raise ApiError(f"MLX-LM returned HTTP {response.status}.")
+                detail = response.read().decode("utf-8", errors="replace")[:500]
+                try:
+                    packet = json.loads(detail)
+                    if isinstance(packet, dict):
+                        detail = packet.get("error", detail)
+                except json.JSONDecodeError:
+                    pass
+                raise ApiError(f"MLX-LM returned HTTP {response.status}: {detail}")
             if "text/event-stream" not in content_type:
                 raw = response.read().decode("utf-8", errors="replace")
                 raise ApiError(f"Expected an event stream but received: {raw[:500]}")
@@ -217,10 +237,14 @@ class ChatClient:
                 usage = packet.get("usage")
                 if isinstance(usage, dict):
                     yield StreamEvent("usage", usage=usage, raw=packet)
-                choices = packet.get("choices") or []
+                choices = packet.get("choices", [])
+                if not isinstance(choices, list) or any(
+                    not isinstance(choice, dict) for choice in choices
+                ):
+                    raise ApiError("Invalid streaming event from MLX-LM: invalid choices list.")
                 if not choices:
                     continue
-                choice = choices[0] if isinstance(choices[0], dict) else {}
+                choice = choices[0]
                 finish_reason = choice.get("finish_reason")
                 delta = choice.get("delta") or choice.get("message") or {}
                 if not isinstance(delta, dict):
@@ -232,6 +256,10 @@ class ChatClient:
                     if reasoning:
                         break
                 if reasoning:
+                    if not native_reasoning:
+                        for kind, text in splitter.finish():
+                            if text:
+                                yield StreamEvent(kind, text=text, raw=packet)
                     native_reasoning = True
                     yield StreamEvent("reasoning", text=reasoning, raw=packet)
 
@@ -263,11 +291,12 @@ class ChatClient:
         *,
         think: bool,
         on_event: Any = None,
+        cancel_event: Any = None,
     ) -> GenerationResult:
         result = GenerationResult()
         started = time.monotonic()
         first = None
-        stream = self.stream_chat(messages, think=think)
+        stream = self.stream_chat(messages, think=think, cancel_event=cancel_event)
         try:
             for event in stream:
                 if event.kind in {"reasoning", "content"} and event.text:
@@ -287,7 +316,7 @@ class ChatClient:
             result.finish_reason = "cancelled"
         except (ApiError, ServerUnavailableError):
             raise
-        except (OSError, http.client.HTTPException) as exc:
+        except (OSError, http.client.HTTPException, ValueError) as exc:
             raise ServerUnavailableError(
                 f"The connection to {self.base_url} ended during generation: {exc}"
             ) from exc
@@ -328,7 +357,9 @@ class ChatClient:
                 packet = json.loads(response.read().decode("utf-8"))
         except (OSError, ValueError, urllib.error.URLError) as exc:
             raise ServerUnavailableError(f"Cannot list models from {self.base_url}: {exc}") from exc
-        data: Iterable[Any] = packet.get("data", []) if isinstance(packet, dict) else []
+        if not isinstance(packet, dict) or not isinstance(packet.get("data"), list):
+            raise ApiError("Invalid model list from MLX-LM: expected a data list.")
+        data = packet["data"]
         return sorted(
             str(item["id"])
             for item in data

@@ -5,8 +5,6 @@ from __future__ import annotations
 import difflib
 import json
 import shlex
-import shutil
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +16,7 @@ from rich.text import Text
 
 from . import MODEL_PRESETS, resolve_model_preset
 from .client import ChatClient, GenerationResult
+from .commands import SLASH_COMMANDS
 from .config import (
     Settings,
     app_home,
@@ -26,15 +25,19 @@ from .config import (
     normalize_session_name,
     save_session,
 )
+from .context import DEFAULT_SYSTEM_PROMPT, select_context, system_messages
 from .errors import MlxChatError
 from .server import (
     ServerManager,
     StartResult,
+    health,
     stop_record,
     tail_log,
 )
+from .sessions import SESSION_SETTINGS, latest_result, restore_session
+from .terminal import copy_text
 from .tts import speak
-from .ui import READ_ONLY_COMMANDS, SLASH_COMMANDS, TerminalUI, sanitize_terminal_text, short_model
+from .ui import TerminalUI, sanitize_terminal_text, short_model
 from .voice import (
     DEFAULT_TRANSCRIPTION_MODEL,
     preload_transcription_model,
@@ -42,20 +45,6 @@ from .voice import (
     transcribe_audio,
 )
 from .web import WebSearcher
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful assistant running locally on an Apple Silicon MacBook with macOS. "
-    "Give clear, direct answers. Tailor commands, paths, shortcuts, and setup instructions "
-    "to macOS and its default zsh shell unless the user asks for another platform. "
-    "Use fenced Markdown code blocks with a language label for code and commands. "
-    "Be honest about uncertainty and never claim to have run commands or accessed files "
-    "unless you actually have."
-)
-
-CONCISE_SYSTEM_PROMPT = (
-    "Answer directly and briefly. Prefer the minimum explanation needed to be useful; "
-    "do not reveal chain-of-thought."
-)
 
 
 def utc_now() -> str:
@@ -89,9 +78,9 @@ class ChatApp:
         self.last_result: GenerationResult | None = None
         self.should_exit = False
         self.voice_ready = False
-        self.ui.command_previewer = self._preview_command
 
-        self._preload_voice()
+        if settings.preload_voice:
+            self._preload_voice()
 
         if session_name:
             try:
@@ -110,18 +99,15 @@ class ChatApp:
             self.ui.warning(f"Voice is unavailable: {exc}")
 
     def api_messages(self) -> list[dict[str, str]]:
-        messages: list[dict[str, str]] = []
-        messages.append(
-            {"role": "system", "content": self.settings.system_prompt or DEFAULT_SYSTEM_PROMPT}
-        )
-        if self.settings.concise:
-            messages.append({"role": "system", "content": CONCISE_SYSTEM_PROMPT})
+        messages = system_messages(self.settings)
         for item in self.transcript:
             role = item.get("role")
             content = item.get("api_content", item.get("content"))
             if role in {"user", "assistant"} and isinstance(content, str):
                 messages.append({"role": role, "content": content})
-        return messages
+        selection = select_context(messages, self.settings)
+        self.context_omitted_messages = selection.omitted_messages
+        return selection.messages
 
     def run(self) -> int:
         self.ui.enable_conversation()
@@ -132,11 +118,14 @@ class ChatApp:
             self.ui.close_conversation()
 
     def _run(self) -> int:
+        self.ui.set_context(self.session_name, len(self.transcript))
         self.ui.banner(
             reused=self.start_result.reused,
             managed=self.start_result.managed,
             voice_ready=self.voice_ready,
         )
+        if self.transcript:
+            self.ui.restore_transcript(self.transcript, replace=False)
         if self.session_name:
             self.ui.info(f"Session {self.session_name!r} is active and will auto-save.")
 
@@ -181,11 +170,18 @@ class ChatApp:
             return False
 
         try:
+            messages = self.api_messages()
+            if self.context_omitted_messages:
+                self.ui.warning(
+                    f"Context budget: {self.context_omitted_messages} older messages omitted "
+                    "from this request. The full conversation is retained."
+                )
             result = self.ui.render_generation(
                 lambda callback: self.client.collect(
-                    self.api_messages(),
+                    messages,
                     think=self.settings.think and not self.settings.concise,
                     on_event=callback,
+                    cancel_event=getattr(self.ui, "cancellation_event", None),
                 ),
                 think=self.settings.think and not self.settings.concise,
             )
@@ -219,25 +215,15 @@ class ChatApp:
         self._autosave()
         return True
 
-    def _preview_command(self, command):
-        if command in READ_ONLY_COMMANDS:
-            self._dispatch_command(command)
-        else:
-            self.ui.preview_command(command)
-
     def _handle_command(self, value: str) -> None:
         command = value.split()[0].lower() if value.split() else ""
-        if (
-            command in READ_ONLY_COMMANDS
-            and getattr(self.ui, "last_preview_command", None) == command
-        ):
-            self.ui.last_preview_command = None
-            return
         popup = getattr(self.ui, "command_popup", None)
         if popup is not None and command not in {
             "/voice",
             "/web",
             "/retry",
+            "/load",
+            "/undo",
             "/stop",
             "/shutdown",
             "/exit",
@@ -517,8 +503,11 @@ class ChatApp:
             self.transcript.pop()
         if self.transcript and self.transcript[-1].get("role") == "user":
             self.transcript.pop()
-        self.last_result = None
+        self.last_result = latest_result(self.transcript)
         self._autosave()
+        restore = getattr(self.ui, "restore_transcript", None)
+        if restore is not None:
+            restore(self.transcript)
         self.ui.success("Removed the last turn.")
 
     def _cmd_settings(self) -> None:
@@ -535,6 +524,10 @@ class ChatApp:
             ("top_k", str(self.settings.top_k)),
             ("min_p", f"{self.settings.min_p:g}"),
             ("max_tokens", str(self.settings.max_tokens)),
+            ("context_tokens", str(self.settings.context_tokens)),
+            ("connect_timeout", f"{self.settings.connect_timeout} s"),
+            ("request_timeout", f"{self.settings.request_timeout} s"),
+            ("preload_voice", "on" if self.settings.preload_voice else "off"),
             ("repetition_penalty", f"{self.settings.repetition_penalty:g}"),
             ("system_prompt", self.settings.system_prompt or DEFAULT_SYSTEM_PROMPT),
             ("web_results", str(self.settings.web_results)),
@@ -565,8 +558,8 @@ class ChatApp:
             raise MlxChatError(f"{display} must be at least {minimum}.")
         if maximum is not None and value > maximum:
             raise MlxChatError(f"{display} must be at most {maximum}.")
-        setattr(self.settings, key, value)
-        self.settings.validate()
+        candidate = self.settings.merged(**{key: value})
+        setattr(self.settings, key, getattr(candidate, key))
         self._autosave()
         self.ui.success(f"{display} = {value}")
 
@@ -593,7 +586,9 @@ class ChatApp:
         table = Table(box=box.SIMPLE, show_header=False, pad_edge=False)
         table.add_column(style="cyan")
         table.add_column()
-        table.add_row("Server", "running")
+        table.add_row(
+            "Server", "running" if health(self.settings.host, self.settings.port) else "unavailable"
+        )
         table.add_row("Ownership", "managed" if record else "external")
         if record:
             table.add_row(Text("PID"), Text(str(record.pid)))
@@ -723,6 +718,7 @@ class ChatApp:
                 "top_k": self.settings.top_k,
                 "min_p": self.settings.min_p,
                 "max_tokens": self.settings.max_tokens,
+                "context_tokens": self.settings.context_tokens,
             },
             "messages": self.transcript,
             "updated_at": utc_now(),
@@ -751,36 +747,20 @@ class ChatApp:
         self.ui.success(f"Saved session {name!r} to {path}.")
 
     def _load(self, name: str, *, announce: bool = True) -> None:
+        name = normalize_session_name(name)
         payload = load_session(name)
-        messages = payload.get("messages", [])
-        candidate_messages = [item for item in messages if isinstance(item, dict)]
-        overrides: dict[str, Any] = {
-            "system_prompt": payload.get("system_prompt") or "",
-        }
-        saved = payload.get("settings", {})
-        if isinstance(saved, dict):
-            for key in ("think", "concise", "temperature", "top_p", "top_k", "min_p", "max_tokens"):
-                if key in saved:
-                    overrides[key] = saved[key]
-        candidate = self.settings.merged(**overrides)
+        restored = restore_session(payload, self.settings)
 
-        # Commit only after all saved values have passed validation.
-        self.transcript = candidate_messages
-        for key in (
-            "system_prompt",
-            "think",
-            "concise",
-            "temperature",
-            "top_p",
-            "top_k",
-            "min_p",
-            "max_tokens",
-        ):
-            setattr(self.settings, key, getattr(candidate, key))
+        # Commit only after every saved message and setting has passed validation.
+        self.transcript = restored.messages
+        for key in ("system_prompt", *SESSION_SETTINGS):
+            setattr(self.settings, key, getattr(restored.settings, key))
         self.session_name = name
-        self.last_result = None
+        self.last_result = restored.last_result
         if announce:
-            saved_model = payload.get("model")
+            saved_model = restored.model
+            self.ui.set_context(self.session_name, len(self.transcript))
+            self.ui.restore_transcript(self.transcript)
             self.ui.success(f"Loaded session {name!r} ({len(self.transcript)} messages).")
             if saved_model and saved_model != self.settings.model:
                 self.ui.warning(
@@ -838,10 +818,7 @@ class ChatApp:
             )
         else:
             raise MlxChatError("Usage: /copy [answer|reasoning|all]")
-        executable = shutil.which("pbcopy")
-        if not executable:
-            raise MlxChatError("pbcopy is not available on this system.")
-        subprocess.run([executable], input=value, text=True, check=True)
+        copy_text(value)
         self.ui.success(f"Copied {mode} to the clipboard.")
 
     def _cmd_export(self, args: list[str]) -> None:

@@ -213,20 +213,6 @@ def test_redirect_includes_cancelled_answer_and_new_message_in_context():
     assert requests[-1][-1]["content"] == "New direction"
 
 
-def test_command_previews_do_not_execute_actions():
-    app = bare_app()
-    dispatched = []
-    previews = []
-    app._dispatch_command = dispatched.append
-    app.ui.preview_command = previews.append
-    for command in ("/help", "/settings", "/system", "/stats", "/status"):
-        app._preview_command(command)
-    for command in ("/think", "/restart", "/speak", "/stop"):
-        app._preview_command(command)
-    assert dispatched == ["/help", "/settings", "/system", "/stats", "/status"]
-    assert previews == ["/think", "/restart", "/speak", "/stop"]
-
-
 @pytest.mark.parametrize("command", ["/stop", "/exit", "/quit"])
 def test_quit_commands_do_not_open_a_second_popup(command):
     app = bare_app()
@@ -235,3 +221,189 @@ def test_quit_commands_do_not_open_a_second_popup(command):
     app._dispatch_command = dispatched.append
     app._handle_command(command)
     assert dispatched == [command]
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "99"])
+def test_invalid_numeric_command_preserves_active_settings(value):
+    app = bare_app()
+    original = app.settings.temperature
+
+    with pytest.raises(MlxChatError):
+        app._set_number("temperature", [value], float, 0, 5)
+
+    assert app.settings.temperature == original
+    assert app.api_messages()[-1]["content"] == "keep me"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"messages": ["invalid"]},
+        {"messages": [{"role": [], "content": "invalid"}]},
+        {"messages": [{"role": "user", "content": 123}]},
+        {"messages": [{"role": "user", "content": "hi", "api_content": []}]},
+        {"messages": [], "settings": []},
+        {"messages": [], "system_prompt": []},
+    ],
+)
+def test_invalid_session_preserves_current_conversation(monkeypatch, payload):
+    app = bare_app()
+    original = app.transcript
+    previous_result = app.last_result
+    monkeypatch.setattr(chat, "load_session", lambda _name: payload)
+
+    with pytest.raises(MlxChatError, match="not valid"):
+        app._load("broken")
+
+    assert app.transcript is original
+    assert app.last_result is previous_result
+    assert app.session_name == "current"
+
+
+@pytest.mark.parametrize("healthy", [True, False])
+def test_chat_status_reports_endpoint_health(monkeypatch, healthy):
+    import io
+
+    from rich.console import Console
+
+    app = bare_app()
+    app.manager = SimpleNamespace(matching_record=lambda: None)
+    output = io.StringIO()
+    app.ui.console = Console(file=output, width=100)
+    monkeypatch.setattr(chat, "health", lambda host, port: healthy)
+
+    app._cmd_status()
+
+    assert ("running" if healthy else "unavailable") in output.getvalue()
+
+
+@pytest.mark.parametrize("preload", [False, True])
+def test_voice_preload_is_optional_at_chat_startup(monkeypatch, preload):
+    from mlx_chat.server import StartResult
+
+    loaded = []
+    monkeypatch.setattr(chat, "TerminalUI", lambda *_args, **_kw: SimpleNamespace())
+    monkeypatch.setattr(chat.ChatApp, "_preload_voice", lambda _self: loaded.append("voice"))
+    settings = Settings(preload_voice=preload)
+    start = StartResult(settings.model, settings.host, settings.port, None, None, True, False)
+    app = chat.ChatApp(settings, start)
+    assert loaded == (["voice"] if preload else [])
+    assert app.transcript == []
+
+
+def test_load_restores_latest_result_and_visible_transcript(monkeypatch):
+    app = bare_app()
+    rendered = []
+    messages = [
+        {"role": "user", "content": "Saved question"},
+        {
+            "role": "assistant",
+            "content": "Saved answer",
+            "usage": {"completion_tokens": 20},
+            "metrics": {"elapsed": 4, "first_token_seconds": 1},
+        },
+    ]
+    monkeypatch.setattr(chat, "load_session", lambda _name: {"messages": messages})
+    app.ui.set_context = lambda name, count: rendered.append((name, count))
+    app.ui.restore_transcript = lambda value: rendered.append(value)
+    app._load("saved")
+    assert app.last_result.answer == "Saved answer"
+    assert app.last_result.tokens_per_second == 5
+    assert rendered == [("saved", 2), messages]
+    assert app.session_name == "saved"
+
+
+def test_undo_restores_previous_result_and_speech_target():
+    app = bare_app()
+    app.transcript = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer", "reasoning": "First reasoning"},
+        {"role": "user", "content": "Second question"},
+        {"role": "assistant", "content": "Second answer"},
+    ]
+    restored = []
+    app.ui.restore_transcript = restored.append
+    app._cmd_undo()
+    assert app.last_result.answer == "First answer"
+    assert app.last_result.reasoning == "First reasoning"
+    assert restored == [app.transcript]
+    assert len(app.transcript) == 2
+
+
+def test_generation_warns_about_omitted_context_but_preserves_full_transcript():
+    app = bare_app()
+    app.settings = Settings(system_prompt="Short instructions", context_tokens=600, max_tokens=100)
+    app.transcript = [
+        {"role": "user", "content": "Old question " * 100},
+        {"role": "assistant", "content": "Old answer"},
+    ]
+    warnings = []
+    requests = []
+    app.ui.warning = warnings.append
+    app.ui.render_generation = lambda generate, **kw: generate(lambda *args: None)
+    app.client = SimpleNamespace(
+        collect=lambda messages, **kw: requests.append(messages) or GenerationResult(answer="new")
+    )
+    assert app._generate("Latest question")
+    assert requests[-1] == [
+        {"role": "system", "content": "Short instructions"},
+        {"role": "user", "content": "Latest question"},
+    ]
+    assert len(app.transcript) == 4
+    assert "2 older messages omitted" in warnings[0]
+
+
+def test_invalid_saved_metrics_do_not_replace_current_session(monkeypatch):
+    app = bare_app()
+    original = app.transcript
+    previous = app.last_result
+    monkeypatch.setattr(
+        chat,
+        "load_session",
+        lambda _name: {
+            "messages": [{"role": "assistant", "content": "bad", "metrics": {"elapsed": -1}}]
+        },
+    )
+    with pytest.raises(MlxChatError, match="elapsed"):
+        app._load("broken")
+    assert app.transcript is original
+    assert app.last_result is previous
+
+
+def test_speak_and_stats_work_immediately_after_loading(monkeypatch):
+    import io
+    from contextlib import nullcontext
+
+    from rich.console import Console
+
+    app = bare_app()
+    spoken = []
+    output = io.StringIO()
+    monkeypatch.setattr(
+        chat,
+        "load_session",
+        lambda _name: {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": "Restored answer",
+                    "usage": {"completion_tokens": 6},
+                    "metrics": {"elapsed": 2, "first_token_seconds": 0.5},
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(chat, "speak", lambda text, **kw: spoken.append(text) or False)
+    app.ui.set_context = lambda *_args: None
+    app.ui.restore_transcript = lambda _messages: None
+    app.ui.console = Console(file=output, width=100)
+    app.ui.audio_status = lambda _message: nullcontext()
+    app.ui.run_audio = lambda operation, **kw: operation(None)
+    app.ui.info = lambda _message: None
+    app._load("saved")
+    app._cmd_speak([])
+    app._cmd_stats()
+    assert spoken == ["Restored answer"]
+    assert "2.000 s" in output.getvalue()
+    assert "3.00 token/s" in output.getvalue()

@@ -4,7 +4,8 @@ Tests use `pytest` and are intentionally split by module. Run them from the
 project root:
 
 ```bash
-uv sync --locked --extra dev --extra voice
+uv sync --locked --extra dev
+uv build
 uv run --no-sync pytest
 ```
 
@@ -19,21 +20,34 @@ uv run pytest tests/test_cli.py -k preset
 
 | File | Covers |
 | --- | --- |
-| `test_cli.py` | Argument parsing, model aliases, settings resolution, and CLI behavior. |
+| `test_cli.py` | Argument parsing, model aliases, settings resolution, config keys, and one-off concise prompts. |
 | `test_config.py` | Validation, saved configuration, sessions, and filesystem-safe names. |
-| `test_client.py` | API payloads, streaming events, reasoning splitting, and result metrics. |
-| `test_chat.py` | Slash-command behavior and conversation state changes. |
-| `test_ui.py` | Terminal sanitization, live rendering bounds, and presentation helpers. |
+| `test_client.py` | API payloads, malformed responses, streaming events, reasoning splitting, and result metrics. |
+| `test_chat.py` | Slash commands, transactional settings/session changes, and endpoint health. |
+| `test_ui.py` | Terminal sanitization, plain output, input editing, and presentation helpers. |
+| `test_conversation.py` | Streaming, scrolling, static previews, selection, and keyboard controls. |
 | `test_server.py` | Managed-server records, health checks, process identity, and shutdown safety. |
-| `test_lifecycle.py` | Start, reuse, switching, restoration, and cleanup behavior. |
+| `test_lifecycle.py` | Start, reuse, switching, restoration, interrupted initialization, and ephemeral cleanup. |
 | `test_web.py` | Search input validation and safe bounded web context. |
 | `test_tts.py` | Text cleanup, English Kokoro speech, errors, and playback cancellation. |
 | `test_resources.py` | CPU/RAM snapshots and unavailable process metrics. |
+| `test_context.py` | Request budgeting, complete-turn retention, and oversized prompts. |
+| `test_sessions.py` | Saved-state validation, historical metrics, and result restoration. |
+| `test_integration.py` | Real localhost SSE, cancellation, timeouts, CLI processes, safe dummy-child lifecycle, and wheel imports. |
+| `test_setup.py` | Text-only installer defaults and explicit voice/web extras. |
 
 `conftest.py` points imports at this source checkout. Tests that write application
 state isolate it through `MLX_CHAT_HOME`, so they do not overwrite real sessions
 or configuration. Text-only installations can omit `--extra voice`; tests that
-need optional audio libraries skip. GitHub checks exercise both installations.
+need optional audio libraries skip. Add `--extra voice --extra web` for a full
+installation. GitHub checks exercise both installations.
+
+Build the wheel before running the full suite (`uv build`). The packaging smoke
+test extracts that wheel into a temporary installation and imports it outside
+the checkout. It skips if no wheel is available. CI builds before running tests.
+Local integration tests require permission to bind a loopback port, inspect
+process identity, and signal the exact dummy child created by the test. They do
+not start an inference server or access external network services.
 
 ## Adding a test
 

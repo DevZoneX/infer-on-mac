@@ -3,16 +3,18 @@
 Develop on an Apple Silicon Mac with Python 3.11+ and uv.
 
 ```bash
-uv sync --locked --python 3.11 --extra dev --extra voice
+uv sync --locked --python 3.11 --extra dev
 uv run --no-sync ruff check src tests
 uv run --no-sync ruff format --check src tests
-uv run --no-sync pytest
 uv build
+uv run --no-sync pytest
 ```
 
-For text-only development, omit `--extra voice`. Audio tests that require
-optional dependencies will skip. Automated tests must not download models,
+Add `--extra voice --extra web` for optional features. Audio tests that require
+optional dependencies otherwise skip. Automated tests must not download models,
 record microphones, play sound, or start inference servers.
+Local HTTP fixtures and harmless dummy child processes are permitted for
+integration tests. Build the wheel before testing to exercise packaged imports.
 
 See [the source guide](src/README.md) for module responsibilities and
 [the test guide](tests/README.md) for coverage and conventions. Keep changes

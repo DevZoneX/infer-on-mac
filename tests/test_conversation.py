@@ -338,9 +338,7 @@ def test_answer_metrics_are_unboxed_dim_metadata(monkeypatch, tmp_path):
         "mlx_chat.ui.Console",
         lambda **kw: Console(file=io.StringIO(), force_terminal=True, width=120, height=40),
     )
-    monkeypatch.setattr(
-        "mlx_chat.ui.resource_snapshot", lambda: type("Snapshot", (), {"processes": []})()
-    )
+    monkeypatch.setattr("mlx_chat.rendering.resource_snapshot", lambda _port: None)
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         ui = TerminalUI(Settings())
         ui.enable_conversation()
@@ -473,7 +471,7 @@ def test_drag_selects_and_copies_while_mouse_scrolling_stays_enabled(monkeypatch
     )
     copied = []
     monkeypatch.setattr(
-        "mlx_chat.conversation.subprocess.run", lambda args, **kw: copied.append(kw["input"])
+        "mlx_chat.terminal.subprocess.run", lambda args, **kw: copied.append(kw["input"])
     )
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         ui = TerminalUI(Settings())
@@ -568,7 +566,7 @@ def test_input_during_generation_redirects_or_preserves_draft_and_partial_answer
         "mlx_chat.ui.Console",
         lambda **kw: Console(file=io.StringIO(), force_terminal=True, width=80, height=40),
     )
-    monkeypatch.setattr("mlx_chat.ui.resource_snapshot", lambda: SimpleNamespace(processes=[]))
+    monkeypatch.setattr("mlx_chat.rendering.resource_snapshot", lambda _port: None)
     client = ChatClient(Settings())
 
     def stream(*args, **kwargs):
@@ -646,7 +644,7 @@ def test_thinking_click_expands_trace_and_stats_touch_answer(monkeypatch, tmp_pa
         "mlx_chat.ui.Console",
         lambda **kw: Console(file=io.StringIO(), force_terminal=True, width=80, height=40),
     )
-    monkeypatch.setattr("mlx_chat.ui.resource_snapshot", lambda: SimpleNamespace(processes=[]))
+    monkeypatch.setattr("mlx_chat.rendering.resource_snapshot", lambda _port: None)
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         ui = TerminalUI(Settings())
         ui.enable_conversation()
@@ -710,7 +708,7 @@ def test_clicking_help_command_places_it_in_composer_without_running_it(
         lambda **kw: Console(file=io.StringIO(), force_terminal=True, width=100, height=40),
     )
     monkeypatch.setattr(
-        "mlx_chat.conversation.subprocess.run",
+        "mlx_chat.terminal.subprocess.run",
         lambda *args, **kwargs: pytest.fail("Clicking a command must not copy or execute it"),
     )
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
@@ -827,8 +825,7 @@ def test_composer_has_visual_placeholder_and_mac_paste_hint(monkeypatch, tmp_pat
         assert "Write a message" in captured[0]
         assert "⌘V" not in captured[0]
         assert not ui.prompt_session.default_buffer.text
-        view.busy = True
-        view.allow_input = True
+        view.mode = "generation"
         assert "redirect" in view.composer_placeholder()
 
 
