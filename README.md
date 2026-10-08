@@ -131,10 +131,10 @@ Then, in chat:
 
 1. Press `F1` to start voice input and speak normally.
 2. Recording stops automatically after about 1.2 seconds of silence following speech.
-   Press `F2` to finish sooner (`Ctrl-C` also works).
+   Press `F3` to finish sooner (`Ctrl-C` also works).
 3. `/voice` remains available as an alternative to the shortcut.
 
-On MacBooks where function keys control hardware, hold `Fn` when pressing `F1`–`F4`.
+On MacBooks where function keys control hardware, hold `Fn` when pressing `F1`–`F3`.
 
 Voice uses `mlx-community/whisper-large-v3-turbo`, which loads when chat starts
 so the first voice prompt is ready. Its loading is shown cleanly in the startup
@@ -143,9 +143,9 @@ permission. Audio and transcription stay on the Mac.
 
 ## Hear model answers
 
-Use `/speak` or `F3` to read the latest answer in English with local
+Use `/speak` or `F2` to read the latest answer in English with local
 `mlx-community/Kokoro-82M-bf16` and its `af_heart` voice. The model loads on
-first use and is reused afterward. Press `F4` (or `Ctrl-C`) to stop playback.
+first use and is reused afterward. Press `F3` (or `Ctrl-C`) to stop playback.
 Emoji, model tokens, Markdown formatting, URLs, and fenced code are omitted.
 Only one English speech model is used. FFmpeg is needed for microphone
 transcription, not speech output. On first use, Kokoro may also download its
@@ -165,9 +165,9 @@ English phonemizer data; synthesis stays local afterward.
 | More deliberate reasoning | `/think on` |
 | Change model | `/model small`, `/model medium`, or `/model large` |
 | Start voice input | `F1` or `/voice` |
-| Stop voice input | `F2` or `Ctrl-C` |
-| Read the latest answer aloud | `F3` or `/speak` |
-| Stop speaking | `F4` or `Ctrl-C` |
+| Stop voice input | `F3` or `Ctrl-C` |
+| Read the latest answer aloud | `F2` or `/speak` |
+| Stop speaking | `F3` or `Ctrl-C` |
 | Retry the last answer | `/retry` |
 | Remove the latest turn | `/undo` |
 | Start fresh | `/new` or `/reset` |

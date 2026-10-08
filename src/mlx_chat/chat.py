@@ -34,7 +34,7 @@ from .server import (
     tail_log,
 )
 from .tts import speak
-from .ui import SLASH_COMMANDS, TerminalUI, sanitize_terminal_text, short_model
+from .ui import READ_ONLY_COMMANDS, SLASH_COMMANDS, TerminalUI, sanitize_terminal_text, short_model
 from .voice import (
     DEFAULT_TRANSCRIPTION_MODEL,
     preload_transcription_model,
@@ -89,6 +89,7 @@ class ChatApp:
         self.last_result: GenerationResult | None = None
         self.should_exit = False
         self.voice_ready = False
+        self.ui.command_previewer = self._preview_command
 
         self._preload_voice()
 
@@ -102,9 +103,7 @@ class ChatApp:
     def _preload_voice(self) -> None:
         """Warm Whisper alongside the chat model without making text chat unavailable."""
         try:
-            with self.ui.console.status(
-                Text("Downloading and loading local voice model…", style="cyan")
-            ):
+            with self.ui.startup_status("Preparing voice recognition…"):
                 preload_transcription_model()
             self.voice_ready = True
         except (MlxChatError, OSError, ValueError) as exc:
@@ -129,6 +128,7 @@ class ChatApp:
         try:
             return self._run()
         finally:
+            self.ui.set_context(self.session_name, len(self.transcript))
             self.ui.close_conversation()
 
     def _run(self) -> int:
@@ -219,10 +219,31 @@ class ChatApp:
         self._autosave()
         return True
 
+    def _preview_command(self, command):
+        if command in READ_ONLY_COMMANDS:
+            self._dispatch_command(command)
+        else:
+            self.ui.preview_command(command)
+
     def _handle_command(self, value: str) -> None:
         command = value.split()[0].lower() if value.split() else ""
+        if (
+            command in READ_ONLY_COMMANDS
+            and getattr(self.ui, "last_preview_command", None) == command
+        ):
+            self.ui.last_preview_command = None
+            return
         popup = getattr(self.ui, "command_popup", None)
-        if popup is not None and command not in {"/voice", "/web", "/retry"}:
+        if popup is not None and command not in {
+            "/voice",
+            "/web",
+            "/retry",
+            "/stop",
+            "/shutdown",
+            "/exit",
+            "/quit",
+            "/q",
+        }:
             with popup(command):
                 self._dispatch_command(value)
         else:
@@ -363,7 +384,7 @@ class ChatApp:
         if len(args) > 1 or (args and not args[0].isdigit()):
             raise MlxChatError("Usage: /voice [SECONDS]")
         seconds = 30 if not args else int(args[0])
-        with self.ui.audio_status(f"/voice Listening… F2 to finish · up to {seconds}s"):
+        with self.ui.audio_status(f"/voice Listening… F3 to finish · up to {seconds}s"):
             audio = self.ui.run_audio(
                 lambda stop_event: record_microphone(seconds=seconds, stop_event=stop_event)
             )
@@ -393,9 +414,9 @@ class ChatApp:
         else:
             text = self.last_result.answer
         try:
-            with self.ui.audio_status("Speaking… F4 to stop"):
+            with self.ui.audio_status("Speaking… F3 to stop"):
                 stopped = self.ui.run_audio(
-                    lambda stop_event: speak(text, stop_event=stop_event), stop_key="f4"
+                    lambda stop_event: speak(text, stop_event=stop_event), stop_key="f3"
                 )
         except KeyboardInterrupt:
             self.ui.info("Speech stopped.")
@@ -875,5 +896,6 @@ class ChatApp:
             result = stop_record(record)
         if not result.stopped and result.detail != "already stopped":
             raise MlxChatError(result.detail)
+        self.ui.server_stopped = True
         self.ui.success("Server stopped. Model memory has been released.")
         self.should_exit = True

@@ -58,7 +58,7 @@ def _load_engine() -> object:
 
 
 def speak(text: str, *, stop_event=None) -> bool:
-    """Speak locally; return True if F4 or Ctrl-C stopped playback."""
+    """Speak locally; return True if F3 or Ctrl-C stopped playback."""
     text = speech_text(text)
     if not text or not any(char.isalnum() for char in text):
         raise MlxChatError("There is no text to speak.")
@@ -73,7 +73,7 @@ def speak(text: str, *, stop_event=None) -> bool:
                 module=r"torch\.jit\._script",
             )
             with (
-                nullcontext(stop_event) if stop_event is not None else stop_key_listener(Keys.F4)
+                nullcontext(stop_event) if stop_event is not None else stop_key_listener(Keys.F3)
             ) as stopped:
                 engine = _load_engine()
                 if not stopped.is_set():

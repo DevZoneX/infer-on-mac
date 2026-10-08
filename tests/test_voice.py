@@ -3,23 +3,23 @@ from prompt_toolkit.input import create_pipe_input
 from mlx_chat.voice import recording_stop_requested
 
 
-def test_recording_stop_handles_f2_and_ctrl_c_without_blocking():
+def test_recording_stop_handles_f3_and_ctrl_c_without_blocking():
     with create_pipe_input() as keyboard:
         assert not recording_stop_requested(keyboard)
         keyboard.send_text("\x1bOP")
         assert not recording_stop_requested(keyboard)
         keyboard.send_text("x")
         assert not recording_stop_requested(keyboard)
-        keyboard.send_text("\x1bOQ")
+        keyboard.send_text("\x1bOR")
         assert recording_stop_requested(keyboard)
-        keyboard.send_text("\x1b[12~")
+        keyboard.send_text("\x1b[13~")
         assert recording_stop_requested(keyboard)
         keyboard.send_text("\x03")
         assert recording_stop_requested(keyboard)
     assert not recording_stop_requested(None)
 
 
-def test_conversation_recording_waits_for_f2_and_transcribes_captured_audio(monkeypatch):
+def test_conversation_recording_waits_for_f3_and_transcribes_captured_audio(monkeypatch):
     import sys
     import threading
     from types import SimpleNamespace
@@ -42,7 +42,7 @@ def test_conversation_recording_waits_for_f2_and_transcribes_captured_audio(monk
             return False
 
         def read(self, size):
-            # More than two seconds of silence must not end F1/F2 recording.
+            # More than two seconds of silence must not end F1/F3 recording.
             block = np.zeros((size, 1), dtype=np.float32)
             blocks.append(block)
             if len(blocks) == 25:

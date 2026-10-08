@@ -187,6 +187,51 @@ def test_voice_transcription_is_rendered_as_user_input(monkeypatch):
     monkeypatch.setattr(chat, "transcribe_audio", lambda audio, **kw: "My spoken question")
     app._generate = lambda text, **kw: generations.append(text)
     app._cmd_voice([])
-    assert statuses == ["/voice Listening… F2 to finish · up to 30s", "/voice Transcribing…"]
+    assert statuses == ["/voice Listening… F3 to finish · up to 30s", "/voice Transcribing…"]
     assert user_messages == ["My spoken question"]
     assert generations == ["My spoken question"]
+
+
+def test_redirect_includes_cancelled_answer_and_new_message_in_context():
+    app = bare_app()
+    requests = []
+    results = iter(
+        [
+            GenerationResult(answer="Partial answer", finish_reason="cancelled"),
+            GenerationResult(answer="Answer to the new direction", finish_reason="stop"),
+        ]
+    )
+    app.client = SimpleNamespace(
+        collect=lambda messages, **kw: (requests.append(messages.copy()), next(results))[1]
+    )
+    app.ui.render_generation = lambda generate, **kw: generate(lambda *args: None)
+    assert app._generate("Original question")
+    assert app.last_result.answer == "Partial answer"
+    assert app.transcript[-1]["finish_reason"] == "cancelled"
+    assert app._generate("New direction")
+    assert requests[-1][-2]["content"] == "Partial answer"
+    assert requests[-1][-1]["content"] == "New direction"
+
+
+def test_command_previews_do_not_execute_actions():
+    app = bare_app()
+    dispatched = []
+    previews = []
+    app._dispatch_command = dispatched.append
+    app.ui.preview_command = previews.append
+    for command in ("/help", "/settings", "/system", "/stats", "/status"):
+        app._preview_command(command)
+    for command in ("/think", "/restart", "/speak", "/stop"):
+        app._preview_command(command)
+    assert dispatched == ["/help", "/settings", "/system", "/stats", "/status"]
+    assert previews == ["/think", "/restart", "/speak", "/stop"]
+
+
+@pytest.mark.parametrize("command", ["/stop", "/exit", "/quit"])
+def test_quit_commands_do_not_open_a_second_popup(command):
+    app = bare_app()
+    app.ui.command_popup = lambda title: pytest.fail("Quitting must not require dismissing a popup")
+    dispatched = []
+    app._dispatch_command = dispatched.append
+    app._handle_command(command)
+    assert dispatched == [command]

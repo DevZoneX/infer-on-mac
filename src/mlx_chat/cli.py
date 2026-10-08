@@ -40,7 +40,7 @@ from .server import (
     stop_record,
     tail_log,
 )
-from .ui import is_plain_terminal, sanitize_terminal_text, short_model
+from .ui import StartupStatus, is_plain_terminal, sanitize_terminal_text, short_model
 
 COMMANDS = {
     "chat",
@@ -311,15 +311,13 @@ def ensure_server(
         )
         switch_record = existing
 
-    status = console.status(
+    status = StartupStatus(
+        console,
+        settings.model,
         Text(
-            (
-                f"Connecting to {short_model(settings.model)}…"
-                if attach_only
-                else f"Starting {short_model(settings.model)} · first use may download ~2.3 GB…"
-            ),
+            ("Connecting to the local server…" if attach_only else "Preparing the local model…"),
             style="cyan",
-        )
+        ),
     )
     result: StartResult | None = None
     try:
@@ -327,7 +325,7 @@ def ensure_server(
         def ready_check(_result: StartResult) -> None:
             status.update(
                 Text(
-                    "Loading the model and validating generation (this is the slow part)…",
+                    "Loading the model and preparing the first response…",
                     style="cyan",
                 )
             )

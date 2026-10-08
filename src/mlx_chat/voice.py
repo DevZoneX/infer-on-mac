@@ -46,8 +46,8 @@ def preload_transcription_model(model: str = DEFAULT_TRANSCRIPTION_MODEL) -> Non
 
 
 def recording_stop_requested(keyboard) -> bool:
-    """Stop recording on F2 or Ctrl-C, without blocking microphone capture."""
-    return stop_requested(keyboard, Keys.F2)
+    """Stop recording on F3 or Ctrl-C, without blocking microphone capture."""
+    return stop_requested(keyboard, Keys.F3)
 
 
 def record_microphone(*, seconds: int = 30, stop_event=None):
@@ -104,7 +104,7 @@ def record_microphone(*, seconds: int = 30, stop_event=None):
                 else:
                     silent_blocks += 1
                 # Finish after 1.2 seconds of silence following actual speech.
-                # Initial silence never ends capture; F2 remains a manual stop.
+                # Initial silence never ends capture; F3 remains a manual stop.
                 if heard_speech and silent_blocks >= 12:
                     break
     except KeyboardInterrupt:

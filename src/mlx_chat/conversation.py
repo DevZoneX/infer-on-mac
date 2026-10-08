@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from collections import deque
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
+from weakref import WeakValueDictionary
 
 from prompt_toolkit import ANSI
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import to_formatted_text
-from prompt_toolkit.formatted_text.utils import fragment_list_to_text
 from prompt_toolkit.layout import (
     ConditionalContainer,
     Float,
@@ -20,18 +23,22 @@ from prompt_toolkit.layout import (
     Window,
 )
 from prompt_toolkit.layout.containers import ScrollOffsets
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.controls import FormattedTextControl, UIContent
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.mouse_events import MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.renderer import Renderer
 from prompt_toolkit.utils import get_cwidth
 from rich.console import Group
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.style import Style
 from rich.text import Text
 
-CONVERSATION_BACKGROUND = "#181e2a"
+from .theme import ACCENT, CANVAS, MUTED, POPUP, SELECTION
+
+CONVERSATION_BACKGROUND = CANVAS
+POPUP_BACKGROUND = POPUP
 
 
 def edge_style(style, row, offset, height, total):
@@ -97,35 +104,53 @@ class ConversationControl(FormattedTextControl):
 
     def create_content(self, width, height):
         self.view._viewport_rows = height
-        content = super().create_content(width, height)
-        content.cursor_position = Point(0, self.view.scroll_position(self.view.window))
-        return content
+        self.view.prepare_lines()
+        return UIContent(
+            get_line=self.view.line_fragments,
+            line_count=max(1, self.view.line_count),
+            cursor_position=Point(0, self.view.scroll_position(self.view.window)),
+            show_cursor=False,
+        )
 
     def mouse_handler(self, mouse_event):
-        if mouse_event.event_type in {MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN}:
-            self.view.mouse(mouse_event)
-            return None
-        return super().mouse_handler(mouse_event)
+        self.view.mouse(mouse_event)
+        return None
 
 
 class ConversationView:
     def __init__(self, ui):
         self.ui = ui
         self.popup_items = None
+        self.popup_preview = False
+        self._preview_version = 0
+        self._preview_text = None
+        self._output_capture = ContextVar("command_output", default=None)
         self.popup_title = ""
         self.popup_offset = 0
         self.popup_waiting = False
+        self.thinking_traces = WeakValueDictionary()
+        self.trace_item_indices = {}
+        self._item_spans = []
+        self.selection = None
+        self.selection_dragging = False
+        self._popup_lines = []
         self.items = []
         self.pending = None
         self.follow = True
         self.offset = 0
         self.line_count = 0
         self.busy = False
+        self.allow_input = False
+        self.submitted_inputs = deque()
+        self.draft_text = ""
         self.audio_key = None
         self.cancelled = threading.Event()
         self._revision = 0
         self._cache_key = None
         self._lines = []
+        self._history_width = None
+        self._history_line_count = 0
+        self._rendered_item_count = 0
         self.window = Window(
             ConversationControl(self),
             wrap_lines=False,
@@ -136,6 +161,11 @@ class ConversationView:
         session = ui.prompt_session
         composer = session.layout.container
         composer.height = self.composer_height
+        composer.width = self.composer_width
+        self.composer = composer
+        centered_composer = VSplit(
+            [Window(width=Dimension(weight=1)), composer, Window(width=Dimension(weight=1))]
+        )
         self.header = Window(
             FormattedTextControl(self.header_fragments, show_cursor=False),
             height=self.header_height,
@@ -170,25 +200,50 @@ class ConversationView:
         # three-row allocation. Cursor-anchored floats then open above it.
         input_floats = ui._input_float_container
         self.layout = HSplit(
-            [self.header, self.top_separator, self.frame, self.bottom_separator, composer]
+            [
+                self.header,
+                self.top_separator,
+                self.frame,
+                self.bottom_separator,
+                centered_composer,
+                Window(height=2),
+            ],
+            style=f"bg:{CANVAS}",
         )
         session.layout.container = FloatContainer(self.layout, floats=list(input_floats.floats))
         self.completion_floats = [item for item in session.layout.container.floats if item.ycursor]
         for item in self.completion_floats:
             item.ycursor = False
-            item.bottom = 3
+            item.bottom = 7
         popup_window = Window(
             FormattedTextControl(
                 self.popup_fragments,
                 get_cursor_position=lambda: Point(0, self.popup_offset),
             ),
             wrap_lines=False,
-            style="bg:#22313d",
+            style=f"bg:{POPUP_BACKGROUND}",
             get_vertical_scroll=lambda window: self.popup_offset,
         )
         session.layout.container.floats.append(
             Float(
-                ConditionalContainer(popup_window, Condition(lambda: self.popup_items is not None)),
+                ConditionalContainer(
+                    HSplit(
+                        [
+                            Window(
+                                FormattedTextControl(self.popup_heading),
+                                height=3,
+                                style=f"bg:{POPUP_BACKGROUND}",
+                            ),
+                            popup_window,
+                            Window(
+                                FormattedTextControl(self.popup_footer),
+                                height=self.popup_footer_height,
+                                style=f"bg:{POPUP_BACKGROUND}",
+                            ),
+                        ]
+                    ),
+                    Condition(lambda: self.popup_items is not None),
+                ),
                 width=lambda: max(1, min(100, session.app.output.get_size().columns - 4)),
                 height=self.popup_height,
                 z_index=10,
@@ -202,8 +257,11 @@ class ConversationView:
         session.app.renderer = ConversationRenderer(session.app.renderer)
         session.refresh_interval = 0.1
         session.app.refresh_interval = 0.1
+        session.app.min_redraw_interval = 1 / 30
         session.mouse_support = True
-        session.default_buffer.read_only = Condition(lambda: self.busy or self.popup_waiting)
+        session.default_buffer.read_only = Condition(
+            lambda: (self.busy and not self.allow_input) or self.popup_waiting
+        )
         bindings = session.key_bindings
 
         @bindings.add("enter", filter=Condition(lambda: self.popup_waiting), eager=True)
@@ -221,7 +279,7 @@ class ConversationView:
         @bindings.add("down", filter=Condition(lambda: self.popup_waiting))
         def popup_down(event):
             self.popup_offset = min(
-                max(0, self.popup_line_count - self.popup_height()), self.popup_offset + 3
+                max(0, self.popup_line_count - self.popup_body_height()), self.popup_offset + 3
             )
 
         @bindings.add("pageup")
@@ -237,10 +295,20 @@ class ConversationView:
             self.follow = True
             event.app.invalidate()
 
-        @bindings.add("escape", "enter", filter=Condition(lambda: self.busy or self.popup_waiting))
-        @bindings.add("enter", filter=Condition(lambda: self.busy))
+        @bindings.add("enter", filter=Condition(lambda: self.busy and self.allow_input))
+        def submit_during_generation(event):
+            text = event.current_buffer.text
+            if text.strip():
+                self.submitted_inputs.append(text)
+                event.current_buffer.reset()
+                self.cancelled.set()
+
+        @bindings.add(
+            "escape", "enter", filter=Condition(lambda: self.busy and not self.allow_input)
+        )
+        @bindings.add("enter", filter=Condition(lambda: self.busy and not self.allow_input))
         @bindings.add("f1", filter=Condition(lambda: self.busy))
-        @bindings.add("f3", filter=Condition(lambda: self.busy))
+        @bindings.add("f2", filter=Condition(lambda: self.busy))
         def ignore(event):
             pass
 
@@ -250,22 +318,83 @@ class ConversationView:
         def cancel(event):
             self.cancelled.set()
 
-        @bindings.add("f2", filter=Condition(lambda: self.busy and self.audio_key == "f2"))
-        @bindings.add("f4", filter=Condition(lambda: self.busy and self.audio_key == "f4"))
+        @bindings.add("f3", filter=Condition(lambda: self.busy and self.audio_key is not None))
         def stop_audio(event):
             self.cancelled.set()
+
+        session.default_buffer.on_text_changed += self.on_input_changed
 
         self._original_print = ui.console.print
         self._original_status = ui.console.status
         ui.console.print = self.print
         ui.console.status = self.status
-        session.placeholder = lambda: "Working… Ctrl-C to cancel" if self.busy else ""
+        session.placeholder = lambda: [("class:input-placeholder", self.composer_placeholder())]
+
+    def dismiss_preview(self):
+        self._preview_version += 1
+        self._preview_text = None
+        if self.popup_preview:
+            self.popup_preview = False
+            self.popup_items = None
+            self.ui.prompt_session.app.invalidate()
+
+    def on_input_changed(self, buffer):
+        app = self.ui.prompt_session.app
+        if not app.is_running or self.popup_waiting or (self.busy and not self.allow_input):
+            return
+        from .ui import SLASH_COMMANDS
+
+        command = buffer.text.strip().lower()
+        if command not in SLASH_COMMANDS or command in {"/voice", "/web", "/retry"}:
+            self.dismiss_preview()
+            return
+        if self._preview_text == command:
+            return
+        self.dismiss_preview()
+        self._preview_text = command
+        version = self._preview_version
+        self.popup_preview = True
+        self.popup_title = command
+        self.popup_offset = 0
+        self.popup_items = [Text("Preparing…", style="dim")]
+
+        def apply(items):
+            if version != self._preview_version or not self.popup_preview:
+                return
+            self.popup_items = items
+            self._revision += 1
+            app.invalidate()
+
+        def collect():
+            items = []
+            token = self._output_capture.set(items)
+            try:
+                self.ui.command_previewer(command)
+            except Exception as exc:
+                items.append(Text(str(exc), style="dim"))
+            finally:
+                self._output_capture.reset(token)
+            if app.loop is not None and app.is_running:
+                with suppress(RuntimeError):
+                    app.loop.call_soon_threadsafe(apply, items)
+
+        threading.Thread(target=collect, daemon=True).start()
+        app.invalidate()
+
+    def composer_placeholder(self):
+        if self.busy and self.allow_input:
+            return "Add a message… Return to redirect"
+        if self.busy:
+            return "Working…"
+        return "Write a message… / for commands"
 
     @contextmanager
     def popup(self, title):
+        self.dismiss_preview()
         self.popup_items = []
         self.popup_title = title
         self.popup_offset = 0
+        self.selection = None
         try:
             yield
             if self.popup_items:
@@ -276,44 +405,232 @@ class ConversationView:
             self.popup_items = None
             self.ui.prompt_session.app.invalidate()
 
+    def popup_width(self):
+        return max(1, min(100, self.ui.prompt_session.app.output.get_size().columns - 4))
+
+    def popup_heading(self):
+        width = self.popup_width()
+        names = {"/help": "Commands", "/system": "System prompt", "/speak": "Read aloud"}
+        title = names.get(self.popup_title, self.popup_title.lstrip("/").capitalize())
+        left = f"  {title}"
+        right = "esc quit  " if self.popup_preview else "esc  "
+        middle = (
+            "// literal / · Esc+Enter newline · F1 listen · F2 speak · F3 stop"
+            if self.popup_title == "/help"
+            else ""
+        )
+        available = max(0, width - get_cwidth(left) - len(right) - 4)
+        if len(middle) > available:
+            middle = middle[: max(0, available - 1)] + "…" if available else ""
+        gap = max(0, width - get_cwidth(left) - len(right) - len(middle))
+        return [
+            ("", " " * width + "\n"),
+            ("bold fg:#e5e9f0", left),
+            ("", " " * (gap // 2)),
+            ("fg:#a5b1c5", middle),
+            ("", " " * (gap - gap // 2)),
+            ("fg:#a5b1c5", right),
+            ("", "\n" + " " * width),
+        ]
+
+    def popup_info(self):
+        return [
+            item
+            for item in (self.popup_items or [])
+            if isinstance(item, Text) and item.style == "dim"
+        ]
+
+    def popup_footer_height(self):
+        return 3 if self.popup_info() and self.popup_title != "/help" else 1
+
+    def popup_footer(self):
+        info = self.popup_info()
+        if not info or self.popup_title == "/help":
+            return [("", " " * self.popup_width())]
+        text = Text("\n".join(item.plain.strip() for item in info), style="#b3bfd0")
+        return self.popup_render(Padding(text, (1, 2, 0, 2)))
+
     def popup_height(self):
         self.popup_fragments()
         return max(
-            1, min(self.popup_line_count, 28, self.ui.prompt_session.app.output.get_size().rows - 6)
+            1,
+            min(
+                self.popup_line_count + 3 + self.popup_footer_height(),
+                32,
+                self.ui.prompt_session.app.output.get_size().rows - 6,
+            ),
         )
 
+    def popup_body_height(self):
+        return max(1, self.popup_height() - 3 - self.popup_footer_height())
+
+    def selection_mouse(self, event, *, popup=False):
+        if event.button != MouseButton.LEFT:
+            return
+        point = (event.position.y, event.position.x)
+        if event.event_type == MouseEventType.MOUSE_DOWN:
+            self.selection = (popup, point, point)
+            self.selection_dragging = True
+        elif event.event_type == MouseEventType.MOUSE_MOVE and self.selection_dragging:
+            self.selection = (popup, self.selection[1], point)
+        elif event.event_type == MouseEventType.MOUSE_UP and self.selection_dragging:
+            self.selection = (popup, self.selection[1], point)
+            self.selection_dragging = False
+            if self.selection[1] == point and popup and self.select_help_command(point):
+                self.selection = None
+                return
+            if self.selection[1] == point and not popup and self.toggle_trace(point):
+                self.selection = None
+                return
+            text = self.selected_text()
+            if text:
+                try:
+                    subprocess.run(["pbcopy"], input=text, text=True, check=True, timeout=2)
+                except (OSError, subprocess.SubprocessError):
+                    self.ui.warning("Could not copy the selected text to the clipboard.")
+        self.ui.prompt_session.app.invalidate()
+
+    def select_help_command(self, point):
+        if self.popup_title != "/help" or not (self.popup_waiting or self.popup_preview):
+            return False
+        row, column = point
+        if not 0 <= row < len(self._popup_lines):
+            return False
+        x = 0
+        for segment in self._popup_lines[row]:
+            width = get_cwidth(segment.text)
+            command = segment.style.meta.get("help_command") if segment.style else None
+            if x <= column < x + width and command:
+                if self.popup_preview:
+                    from prompt_toolkit.document import Document
+
+                    self.dismiss_preview()
+                    self.ui.prompt_session.default_buffer.document = Document(command, len(command))
+                else:
+                    self.draft_text = command
+                    self.ui.prompt_session.app.exit(result="")
+                return True
+            x += width
+        return False
+
+    def toggle_trace(self, point):
+        row, column = point
+        if row >= len(self._lines):
+            return False
+        x = 0
+        for segment in self._lines[row]:
+            width = get_cwidth(segment.text)
+            token = (segment.style.meta or {}).get("thinking_trace") if segment.style else None
+            if x <= column < x + width and token in self.thinking_traces:
+                trace = self.thinking_traces[token]
+                trace.expanded = not trace.expanded
+                index = self.trace_item_indices.get(token)
+                if index is not None and index < len(self._item_spans):
+                    start, end = self._item_spans[index]
+                    lines = self.ui.console.render_lines(
+                        self.items[index],
+                        self.ui.console.options.update(width=self._history_width),
+                        pad=False,
+                    )
+                    self._lines[start:end] = lines
+                    delta = len(lines) - (end - start)
+                    self._item_spans[index] = (start, start + len(lines))
+                    for later in range(index + 1, len(self._item_spans)):
+                        left, right = self._item_spans[later]
+                        self._item_spans[later] = (left + delta, right + delta)
+                    self._history_line_count += delta
+                self.selection = None
+                self._revision += 1
+                self.ui.prompt_session.app.invalidate()
+                return True
+            x += width
+        return False
+
+    def selected_text(self):
+        if self.selection is None:
+            return ""
+        popup, start, end = self.selection
+        start, end = sorted((start, end))
+        lines = self._popup_lines if popup else self._lines
+        selected = []
+        for row in range(start[0], min(end[0] + 1, len(lines))):
+            value = "".join(segment.text for segment in lines[row])
+            left = start[1] if row == start[0] else 0
+            right = end[1] if row == end[0] else float("inf")
+            column = 0
+            chars = []
+            for char in value:
+                width = get_cwidth(char)
+                if left <= column < right:
+                    chars.append(char)
+                column += width
+            selected.append("".join(chars).rstrip())
+        return "\n".join(selected)
+
+    def selection_fragments(self, text, style, row, column, *, popup=False):
+        result = []
+        bounds = (
+            sorted(self.selection[1:]) if self.selection and self.selection[0] == popup else None
+        )
+        if not bounds or row < bounds[0][0] or row > bounds[1][0]:
+            formatted = to_formatted_text(ANSI(style.render(text, color_system="truecolor")))
+            return [
+                (part[0], part[1], self.popup_mouse if popup else self.mouse) for part in formatted
+            ], column + get_cwidth(text)
+        for char in text:
+            selected = bounds and bounds[0] <= (row, column) < bounds[1]
+            char_style = style + Style(color="#ffffff", bgcolor=SELECTION) if selected else style
+            formatted = to_formatted_text(ANSI(char_style.render(char, color_system="truecolor")))
+            result.extend(
+                (part[0], part[1], self.popup_mouse if popup else self.mouse) for part in formatted
+            )
+            column += get_cwidth(char)
+        return result, column
+
     def popup_mouse(self, event):
+        self.selection_mouse(event, popup=True)
         if event.event_type == MouseEventType.SCROLL_UP:
             self.popup_offset = max(0, self.popup_offset - 3)
         elif event.event_type == MouseEventType.SCROLL_DOWN:
             self.popup_offset = min(
-                max(0, self.popup_line_count - self.popup_height()), self.popup_offset + 3
+                max(0, self.popup_line_count - self.popup_body_height()), self.popup_offset + 3
             )
         self.ui.prompt_session.app.invalidate()
 
-    def popup_fragments(self):
-        width = max(1, min(100, self.ui.prompt_session.app.output.get_size().columns - 4))
-        content = Group(
-            Text(f" {self.popup_title} · Enter/Esc closes · ↑/↓ scroll", style="bold cyan"),
-            *(self.popup_items or []),
-            *([self.pending] if self.pending is not None else []),
-        )
+    def popup_render(self, content, *, body=False):
         lines = self.ui.console.render_lines(
-            content, self.ui.console.options.update(width=width), pad=True
+            content, self.ui.console.options.update(width=self.popup_width()), pad=True
         )
-        self.popup_line_count = len(lines)
+        if body:
+            self.popup_line_count = len(lines)
+            self._popup_lines = lines
         fragments = []
-        for line in lines:
+        for number, line in enumerate(lines):
+            column = 0
             for segment in line:
-                style = segment.style or Style()
-                fragments.extend(
-                    (fragment[0], fragment[1], self.popup_mouse)
-                    for fragment in to_formatted_text(
-                        ANSI(style.render(segment.text, color_system="truecolor"))
+                style = (segment.style or Style()) + Style(bgcolor=POPUP_BACKGROUND)
+                if body:
+                    parts, column = self.selection_fragments(
+                        segment.text, style, number, column, popup=True
                     )
-                )
-            fragments.append(("", "\n"))
+                    fragments.extend(parts)
+                else:
+                    fragments.extend(
+                        to_formatted_text(
+                            ANSI(style.render(segment.text, color_system="truecolor"))
+                        )
+                    )
+            if number < len(lines) - 1:
+                fragments.append(("", "\n", self.popup_mouse))
         return fragments
+
+    def popup_fragments(self):
+        info = self.popup_info()
+        content = Group(
+            *(item for item in (self.popup_items or []) if item not in info),
+            *([self.pending] if self.pending is not None and not self.popup_preview else []),
+        )
+        return self.popup_render(Padding(content, (0, 2)), body=True)
 
     def hint_fragments(self):
         width = self.ui.prompt_session.app.output.get_size().columns
@@ -346,27 +663,32 @@ class ConversationView:
                 fragments.append(("", "\n"))
         return fragments
 
+    def composer_width(self):
+        columns = self.ui.prompt_session.app.output.get_size().columns
+        return max(1, min(104, columns - 4, max(36, int(columns * 0.88))))
+
     def composer_height(self):
         size = self.ui.prompt_session.app.output.get_size()
-        width = max(1, size.columns - 4)
-        rows = sum(
-            max(1, (get_cwidth(line.expandtabs(4)) + width) // width)
-            for line in self.ui.prompt_session.default_buffer.text.split("\n")
-        )
-        height = min(max(3, size.rows // 2), rows + 2)
+        height = min(max(6, size.rows // 2), max(3, self.ui._composer_input_rows()) + 3)
         for item in getattr(self, "completion_floats", []):
-            item.bottom = height
+            item.bottom = height + 2
         return Dimension.exact(height)
 
+    def normal_print(self, *objects, **kwargs):
+        if self._output_capture.get() is not None:
+            return self.print(*objects, **kwargs)
+        return self._original_print(*objects, **kwargs)
+
     def close(self):
+        self.dismiss_preview()
         self.ui.prompt_session.app.renderer.finish()
-        self.ui.console.print = self._original_print
+        self.ui.console.print = self.normal_print
         self.ui.console.status = self._original_status
-        self._original_print(Group(*self.items))
+        self.ui.exit_summary()
 
     @contextmanager
     def status(self, value, *, user=False, **kwargs):
-        spinner = Spinner("dots", text=Text(str(value)), style="green" if user else "bright_cyan")
+        spinner = Spinner("dots", text=Text(str(value)), style=ACCENT if user else MUTED)
         panel = (
             self.ui.user_line(str(value))
             if user
@@ -390,7 +712,18 @@ class ConversationView:
             self.ui.console.render_str(item) if isinstance(item, str) else item for item in objects
         ]
         content = Group(*renderables)
-        target = self.popup_items if self.popup_items is not None else self.items
+        capture = self._output_capture.get()
+        target = (
+            capture
+            if capture is not None
+            else self.popup_items
+            if self.popup_items is not None and not self.popup_preview
+            else self.items
+        )
+        if target is self.items:
+            for item in renderables:
+                if id(item) in self.thinking_traces:
+                    self.trace_item_indices[id(item)] = len(target)
         target.append(
             content
             if all(isinstance(item, Panel) for item in renderables)
@@ -401,7 +734,14 @@ class ConversationView:
 
     def print_info(self, content):
         """Append subdued metadata without turning it into a response bubble."""
-        target = self.popup_items if self.popup_items is not None else self.items
+        capture = self._output_capture.get()
+        target = (
+            capture
+            if capture is not None
+            else self.popup_items
+            if self.popup_items is not None and not self.popup_preview
+            else self.items
+        )
         target.append(content)
         self._revision += 1
         self.ui.prompt_session.app.invalidate()
@@ -432,38 +772,72 @@ class ConversationView:
         self.ui.prompt_session.app.invalidate()
 
     def mouse(self, event):
+        self.selection_mouse(event)
         if event.event_type == MouseEventType.SCROLL_UP:
             self.scroll(-3)
         elif event.event_type == MouseEventType.SCROLL_DOWN:
             self.scroll(3)
 
-    def fragments(self):
+    def prepare_lines(self):
         width = max(1, self.ui.prompt_session.app.output.get_size().columns - 4)
-        animated = self.pending is not None
-        key = (width, self._revision, int(time.monotonic() * 10) if animated else 0)
-        if key != self._cache_key:
-            content = list(self.items)
-            if self.pending is not None and self.popup_items is None:
-                content.append(self.pending)
-            self._lines = self.ui.console.render_lines(
-                Group(*content), self.ui.console.options.update(width=max(1, width)), pad=False
-            )
-            self._cache_key = key
+        animated = self.pending is not None and self.popup_items is None
+        key = (
+            width,
+            self._revision,
+            int(time.monotonic() * 10) if animated else 0,
+            self.popup_items is not None,
+        )
+        if key == self._cache_key:
+            return
+        if width != self._history_width or len(self.items) < self._rendered_item_count:
+            self._lines = []
+            self._history_line_count = 0
+            self._rendered_item_count = 0
+            self._item_spans = []
+            self._history_width = width
+        del self._lines[self._history_line_count :]
+        options = self.ui.console.options.update(width=width)
+        for item in self.items[self._rendered_item_count :]:
+            start = len(self._lines)
+            self._lines.extend(self.ui.console.render_lines(item, options, pad=False))
+            self._item_spans.append((start, len(self._lines)))
+        self._rendered_item_count = len(self.items)
+        self._history_line_count = len(self._lines)
+        if animated:
+            self._lines.extend(self.ui.console.render_lines(self.pending, options, pad=False))
         self.line_count = len(self._lines)
+        self._cache_key = key
+
+    def line_fragments(self, number):
+        if number >= self.line_count:
+            return []
         offset = self.scroll_position(self.window)
         height = self.viewport_height()
         result = []
-        for number, line in enumerate(self._lines):
-            for segment in line:
-                style = edge_style(
-                    segment.style or Style(), number, offset, height, self.line_count
-                )
-                formatted = to_formatted_text(
-                    ANSI(style.render(segment.text, color_system="truecolor"))
-                )
-                if formatted:
-                    result.append((formatted[0][0], fragment_list_to_text(formatted), self.mouse))
-            if number < len(self._lines) - 1:
+        line = self._lines[number]
+
+        column = 0
+        for segment in line:
+            style = edge_style(segment.style or Style(), number, offset, height, self.line_count)
+            if self.popup_items is not None:
+                foreground = style.color.get_truecolor()
+                background = style.bgcolor.get_truecolor()
+                dim_fg = "#{:02x}{:02x}{:02x}".format(*(round(c * 0.35) for c in foreground))
+                dim_bg = "#{:02x}{:02x}{:02x}".format(*(round(c * 0.65) for c in background))
+                style += Style(color=dim_fg, bgcolor=dim_bg)
+            parts, column = self.selection_fragments(segment.text, style, number, column)
+            result.extend(parts)
+        return result
+
+    def fragments(self):
+        """Expose only visible rows; the control requests history lines lazily."""
+        self.prepare_lines()
+        offset = self.scroll_position(self.window)
+        end = min(self.line_count, offset + self.viewport_height())
+        result = []
+        for number in range(offset, end):
+            result.extend(self.line_fragments(number))
+            if number + 1 < end:
                 result.append(("", "\n", self.mouse))
         return result
 
@@ -496,18 +870,25 @@ class ConversationView:
             self.busy = False
             self.update(None)
 
-    def generate(self, generate, preview):
+    def generate(self, generate, preview, *, allow_input=False):
         self.busy = True
+        self.allow_input = allow_input
         self.cancelled.clear()
         self.follow = True
         self.update(preview(None))
         outcome = []
         app = self.ui.prompt_session.app
 
+        last_preview = 0.0
+
         def callback(event, result):
+            nonlocal last_preview
             if self.cancelled.is_set():
                 raise KeyboardInterrupt
-            self.update(preview(result))
+            now = time.monotonic()
+            if now - last_preview >= 1 / 30:
+                self.update(preview(result))
+                last_preview = now
 
         def worker():
             try:
@@ -519,11 +900,19 @@ class ConversationView:
 
         thread = threading.Thread(target=worker, daemon=True)
         try:
-            self.ui.prompt_session.prompt("", bottom_toolbar=None, pre_run=thread.start)
+            self.ui.prompt_session.prompt(
+                "",
+                default=self.draft_text if allow_input else "",
+                bottom_toolbar=None,
+                pre_run=thread.start,
+            )
         finally:
+            if allow_input:
+                self.draft_text = self.ui.prompt_session.default_buffer.text
             self.cancelled.set()
             thread.join()
             self.busy = False
+            self.allow_input = False
             self.update(None)
         if not outcome[0][0]:
             raise outcome[0][1]

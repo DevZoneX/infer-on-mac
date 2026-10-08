@@ -89,7 +89,7 @@ def test_only_known_torch_warning_is_hidden_and_filter_is_restored(monkeypatch):
     ]
 
 
-def test_f4_stops_active_speech_through_playback_event(monkeypatch):
+def test_f3_stops_active_speech_through_playback_event(monkeypatch):
     from prompt_toolkit.input import create_pipe_input
 
     from mlx_chat import keyboard
@@ -106,24 +106,24 @@ def test_f4_stops_active_speech_through_playback_event(monkeypatch):
     monkeypatch.setattr(keyboard.sys.stdin, "isatty", lambda: True)
     with create_pipe_input() as pipe:
         monkeypatch.setattr(keyboard, "create_input", lambda: pipe)
-        pipe.send_text("\x1bOS")
+        pipe.send_text("\x1bOR")
         assert tts.speak("Hello") is True
-    # F4 can arrive during loading, in which case playback is skipped entirely.
+    # F3 can arrive during loading, in which case playback is skipped entirely.
     assert observed in ([], [True])
 
 
-def test_stop_listener_handles_f4_encodings_and_restores_input(monkeypatch):
+def test_stop_listener_handles_f3_encodings_and_restores_input(monkeypatch):
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.keys import Keys
 
     from mlx_chat import keyboard
 
     monkeypatch.setattr(keyboard.sys.stdin, "isatty", lambda: True)
-    for sequence in ("\x1bOS", "\x1b[14~", "\x03"):
+    for sequence in ("\x1bOR", "\x1b[13~", "\x03"):
         with create_pipe_input() as pipe:
             monkeypatch.setattr(keyboard, "create_input", lambda: pipe)
-            with keyboard.stop_key_listener(Keys.F4) as stopped:
-                pipe.send_text("\x1bOR")  # F3 must not stop speech.
+            with keyboard.stop_key_listener(Keys.F3) as stopped:
+                pipe.send_text("\x1bOQ")  # F2 must not stop speech.
                 assert not stopped.wait(0.05)
                 pipe.send_text(sequence)
                 assert stopped.wait(1)

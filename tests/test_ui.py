@@ -148,7 +148,7 @@ def test_short_model(model, maximum, expected):
     assert short_model(model, maximum) == expected
 
 
-def test_f1_starts_voice_and_f3_speaks(monkeypatch, tmp_path):
+def test_f1_starts_voice_and_f2_speaks(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     from prompt_toolkit.application import create_app_session
@@ -165,11 +165,13 @@ def test_f1_starts_voice_and_f3_speaks(monkeypatch, tmp_path):
             app=SimpleNamespace(exit=lambda **kw: commands.append(kw["result"]))
         )
         bindings = ui.prompt_session.key_bindings
-        bindings.get_bindings_for_keys(("f1",))[0].handler(event)
-        bindings.get_bindings_for_keys(("f3",))[0].handler(event)
+        bindings.get_bindings_for_keys(("f1",))[-1].handler(event)
+        bindings.get_bindings_for_keys(("f2",))[-1].handler(event)
         assert commands == ["/voice", "/speak"]
-        assert not bindings.get_bindings_for_keys(("f6",))
-        assert not bindings.get_bindings_for_keys(("c-v",))
+        assert not any(
+            binding.keys == ("f6",) for binding in bindings.get_bindings_for_keys(("f6",))
+        )
+        assert bindings.get_bindings_for_keys(("c-v",))
 
 
 def test_user_prompt_commits_text_once_and_audio_commands_use_inline_status(monkeypatch, tmp_path):
@@ -213,14 +215,14 @@ def test_user_boxes_use_full_width_and_grow_vertically():
     assert heights[0] == 3
     assert heights[1] > heights[0]
     assert heights[2] == 5
-    live = ui.audio_status("Listening… F2 to finish")
+    live = ui.audio_status("Listening… F3 to finish")
     ui.console.print(live.renderable)
     rows = ui.console.file.getvalue().splitlines()
     spinner_row = next(row for row in rows if "Listening" in row)
     assert len(spinner_row) == 50
     assert not any(char in "".join(rows) for char in "│╭╰")
-    assert ui.user_line("hello").style == "on #20352b"
-    assert ui.chat_panel(Text("answer")).style == "on #22313d"
+    assert ui.user_line("hello").style == "on #15191d"
+    assert ui.chat_panel(Text("answer")).style == ""
 
 
 def test_escape_stops_server_and_escape_enter_still_inserts_newline(monkeypatch, tmp_path):
@@ -242,7 +244,7 @@ def test_escape_stops_server_and_escape_enter_still_inserts_newline(monkeypatch,
             current_buffer=SimpleNamespace(insert_text=inserted.append),
         )
         bindings = ui.prompt_session.key_bindings
-        bindings.get_bindings_for_keys(("escape",))[0].handler(event)
+        bindings.get_bindings_for_keys(("escape",))[-1].handler(event)
         assert results == ["/stop"]
         bindings.get_bindings_for_keys(("escape", "c-m"))[0].handler(event)
         assert inserted == ["\n"]
@@ -331,3 +333,95 @@ def test_info_panel_shows_explicit_thinking_and_audio_readiness(
     content = output.getvalue()
     assert "STT: whisper-large-v3-turbo · ready" in content
     assert "TTS: Kokoro-82M-bf16 · ready" in content
+
+
+def test_thinking_spinner_animates_and_label_remains_clickable(monkeypatch):
+    from mlx_chat.ui import ThinkingTrace
+
+    trace = ThinkingTrace("A thought")
+    trace.loading = True
+    console = Console(file=io.StringIO(), width=80)
+    monkeypatch.setattr("mlx_chat.ui.time.monotonic", lambda: 100.0)
+    first = console.render_lines(trace, console.options, pad=False)
+    monkeypatch.setattr("mlx_chat.ui.time.monotonic", lambda: 100.2)
+    second = console.render_lines(trace, console.options, pad=False)
+    first_text = "".join(segment.text for line in first for segment in line)
+    second_text = "".join(segment.text for line in second for segment in line)
+    assert first_text != second_text
+    assert "Thinking" in second_text
+    assert "click to expand" in second_text
+    assert "A thought" not in second_text
+    assert any(
+        segment.style and segment.style.meta.get("thinking_trace") == id(trace)
+        for line in second
+        for segment in line
+    )
+    trace.loading = False
+    trace.expanded = True
+    final = console.render_lines(trace, console.options, pad=False)
+    assert (
+        "".join(segment.text for segment in final[1]).strip() == "◆ Thinking  ·  click to collapse"
+    )
+    assert "A thought" in "".join(segment.text for line in final for segment in line)
+
+
+@pytest.mark.parametrize(
+    "edit,expected",
+    [
+        ("\x01replacement", "replacement"),
+        ("\x01\x7f", ""),
+        ("\x15", ""),
+        ("\x01\x1b[200~pasted\x1b[201~", "pasted"),
+    ],
+)
+def test_composer_select_all_replace_delete_and_clear(monkeypatch, tmp_path, edit, expected):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from mlx_chat.config import Settings
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "mlx_chat.ui.Console",
+        lambda **kw: Console(file=io.StringIO(), force_terminal=True, width=80, height=40),
+    )
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        ui.enable_conversation()
+        pipe.send_text("original text" + edit + "\n")
+        assert ui.prompt() == expected
+
+
+def test_composer_copy_preserves_selection_and_cut_paste_use_clipboard(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from mlx_chat.config import Settings
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "mlx_chat.ui.Console",
+        lambda **kw: Console(file=io.StringIO(), force_terminal=True, width=80, height=40),
+    )
+    clipboard = []
+
+    def clipboard_command(args, **kwargs):
+        if args == ["pbcopy"]:
+            clipboard.append(kwargs["input"])
+            return SimpleNamespace()
+        return SimpleNamespace(stdout=clipboard[-1])
+
+    monkeypatch.setattr("mlx_chat.ui.subprocess.run", clipboard_command)
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        ui.enable_conversation()
+        pipe.send_text("copy me\x01\x03\x7fnew\n")
+        assert ui.prompt() == "new"
+        assert clipboard == ["copy me"]
+        pipe.send_text("cut me\x01\x18\x16\n")
+        assert ui.prompt() == "cut me"
+        assert clipboard[-1] == "cut me"

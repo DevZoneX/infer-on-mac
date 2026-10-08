@@ -256,3 +256,29 @@ def test_think_tag_splitter_flushes_incomplete_marker_as_text():
     assert splitter.feed("answer<th") == [("content", "answer")]
     assert splitter.finish() == [("content", "<th")]
     assert splitter.finish() == []
+
+
+def test_cancel_keeps_partial_answer_and_reasoning_and_closes_stream(monkeypatch):
+    client = ChatClient(Settings())
+    closed = []
+
+    def stream(*args, **kwargs):
+        try:
+            yield StreamEvent("reasoning", text="Partial reasoning")
+            yield StreamEvent("content", text="Partial answer")
+            yield StreamEvent("content", text="Should not be reached")
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(client, "stream_chat", stream)
+
+    def cancel(event, result):
+        if event.kind == "content":
+            raise KeyboardInterrupt
+
+    result = client.collect([], think=True, on_event=cancel)
+    assert result.answer == "Partial answer"
+    assert result.reasoning == "Partial reasoning"
+    assert result.finish_reason == "cancelled"
+    assert result.first_token_seconds is not None
+    assert closed == [True]

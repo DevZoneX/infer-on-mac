@@ -267,8 +267,9 @@ class ChatClient:
         result = GenerationResult()
         started = time.monotonic()
         first = None
+        stream = self.stream_chat(messages, think=think)
         try:
-            for event in self.stream_chat(messages, think=think):
+            for event in stream:
                 if event.kind in {"reasoning", "content"} and event.text:
                     if first is None:
                         first = time.monotonic()
@@ -282,12 +283,18 @@ class ChatClient:
                     result.finish_reason = event.finish_reason
                 if on_event is not None:
                     on_event(event, result)
+        except KeyboardInterrupt:
+            result.finish_reason = "cancelled"
         except (ApiError, ServerUnavailableError):
             raise
         except (OSError, http.client.HTTPException) as exc:
             raise ServerUnavailableError(
                 f"The connection to {self.base_url} ended during generation: {exc}"
             ) from exc
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
         result.elapsed = time.monotonic() - started
         result.first_token_seconds = (first - started) if first is not None else None
         return result
