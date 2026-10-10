@@ -352,6 +352,40 @@ def test_record_matching_accepts_resolved_interpreter_path(tmp_path, monkeypatch
     assert server.record_matches_process(item)
 
 
+@pytest.mark.parametrize("symlink", [False, True])
+@pytest.mark.parametrize("app_location", ["same-version", "other-version", "other-framework"])
+def test_record_matching_framework_python(tmp_path, monkeypatch, symlink, app_location):
+    version = tmp_path / "Python.framework/Versions/3.11"
+    launcher = version / "bin/python3.11"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("launcher")
+    bundled_app = version / "Resources/Python.app/Contents/MacOS/Python"
+    bundled_app.parent.mkdir(parents=True)
+    bundled_app.write_text("bundled app executable")
+    if symlink:
+        alias = tmp_path / "python-alias"
+        alias.symlink_to(launcher)
+        launcher = alias
+    app_version = {
+        "same-version": version,
+        "other-version": tmp_path / "Python.framework/Versions/3.12",
+        "other-framework": tmp_path / "other/Python.framework/Versions/3.11",
+    }[app_location]
+    executable = app_version / "Resources/Python.app/Contents/MacOS/Python"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("app executable")
+    item = record(120, command=[str(launcher)])
+    monkeypatch.setattr(server.os, "getpgid", lambda pid: 120)
+    monkeypatch.setattr(server, "process_start_identity", lambda pid: "start-120")
+    monkeypatch.setattr(
+        server,
+        "process_command",
+        lambda pid: f"{executable} --model model-120 --host 127.0.0.1 --port 8080",
+    )
+
+    assert server.record_matches_process(item) == (app_location == "same-version")
+
+
 def test_process_command_requests_untruncated_arguments(monkeypatch):
     from types import SimpleNamespace
 

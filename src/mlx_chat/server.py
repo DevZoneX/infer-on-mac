@@ -244,7 +244,18 @@ def record_matches_process(record: ServerRecord) -> bool:
         with contextlib.suppress(OSError):
             same_interpreter = Path(arguments[0]).samefile(record.command[0])
         with contextlib.suppress(OSError):
-            executable_names.add(Path(record.command[0]).resolve(strict=True).name)
+            launcher = Path(record.command[0]).resolve(strict=True)
+            executable_names.add(launcher.name)
+            version = launcher.parent.parent
+            if (
+                launcher.parent.name == "bin"
+                and version.parent.name == "Versions"
+                and version.parent.parent.name == "Python.framework"
+                and launcher.name in {"python", "python3", f"python{version.name}"}
+            ):
+                # Framework Python replaces its launcher with the bundled app executable.
+                app_executable = version / "Resources/Python.app/Contents/MacOS/Python"
+                same_interpreter = same_interpreter or Path(arguments[0]).samefile(app_executable)
     configured_executable = same_interpreter or bool(
         record.command
         and any(
