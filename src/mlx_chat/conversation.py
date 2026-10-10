@@ -1,4 +1,4 @@
-"""Scrollable conversation viewport above the existing input design."""
+"""Scrollable chat view."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ from .theme import ACCENT, CANVAS, MUTED, POPUP, SELECTION
 
 CONVERSATION_BACKGROUND = CANVAS
 POPUP_BACKGROUND = POPUP
+AUDIO_POPUP_DISMISS_DELAY = 1.0
 
 
 def edge_style(style, row, offset, height, total):
@@ -143,6 +144,8 @@ class ConversationView:
         self.submitted_inputs = deque()
         self.draft_text = ""
         self.audio_key = None
+        self._audio_stop_deadline = None
+        self._audio_popup_timer = None
         self.cancelled = threading.Event()
         self._revision = 0
         self._cache_key = None
@@ -315,11 +318,20 @@ class ConversationView:
         @bindings.add("escape", filter=Condition(lambda: self.busy))
         @bindings.add("c-d", filter=Condition(lambda: self.busy))
         def cancel(event):
-            self.cancelled.set()
+            if self.audio_key is not None:
+                self.request_audio_stop()
+            else:
+                self.cancelled.set()
 
-        @bindings.add("f3", filter=Condition(lambda: self.busy and self.audio_key is not None))
+        @bindings.add(
+            "f3",
+            filter=Condition(
+                lambda: (self.busy and self.audio_key is not None)
+                or (self.popup_waiting and self.popup_title == "/speak")
+            ),
+        )
         def stop_audio(event):
-            self.cancelled.set()
+            self.request_audio_stop()
 
         session.default_buffer.on_text_changed += self.on_input_changed
 
@@ -378,19 +390,59 @@ class ConversationView:
             return "Working…"
         return "Write a message… / for commands"
 
+    def request_audio_stop(self):
+        self.cancelled.set()
+        self.finish_audio()
+        if self._audio_stop_deadline is not None:
+            self._schedule_audio_popup_dismissal()
+
+    def finish_audio(self):
+        if (
+            self.popup_items is not None
+            and self.popup_title == "/speak"
+            and self._audio_stop_deadline is None
+        ):
+            self._audio_stop_deadline = time.monotonic() + AUDIO_POPUP_DISMISS_DELAY
+
+    def _schedule_audio_popup_dismissal(self):
+        if self._audio_popup_timer is not None:
+            self._audio_popup_timer.cancel()
+        app = self.ui.prompt_session.app
+        deadline = self._audio_stop_deadline
+
+        def dismiss():
+            if self._audio_stop_deadline != deadline or self.popup_title != "/speak":
+                return
+            self.popup_items = None
+            self.update(None)
+            if self.popup_waiting and app.is_running:
+                app.exit(result="")
+
+        self._audio_popup_timer = app.loop.call_later(max(0, deadline - time.monotonic()), dismiss)
+
     @contextmanager
     def popup(self, title):
         self.dismiss_preview()
         self.popup_items = []
         self.popup_title = title
+        self._audio_stop_deadline = None
         self.popup_offset = 0
         self.selection = None
         try:
             yield
-            if self.popup_items:
+            if self.popup_items and (
+                self._audio_stop_deadline is None or time.monotonic() < self._audio_stop_deadline
+            ):
                 self.popup_waiting = True
-                self.ui.prompt_session.app.run()
+                if self._audio_stop_deadline is None:
+                    self.ui.prompt_session.app.run()
+                else:
+                    self.ui.prompt_session.app.run(pre_run=self._schedule_audio_popup_dismissal)
         finally:
+            if self._audio_popup_timer is not None:
+                self._audio_popup_timer.cancel()
+                self._audio_popup_timer = None
+            self._audio_stop_deadline = None
             self.popup_waiting = False
             self.popup_items = None
             self.ui.prompt_session.app.invalidate()

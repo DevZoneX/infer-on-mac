@@ -1,4 +1,4 @@
-"""Rich startup status used by CLI and interactive chat."""
+"""Model loading indicator."""
 
 from rich import box
 from rich.console import Group
@@ -12,7 +12,7 @@ from .theme import ACCENT, BORDER, MUTED
 
 
 class StartupStatus:
-    """A calm startup card with one changing status line."""
+    """Display model loading progress."""
 
     def __init__(self, console, model, message):
         self.console = console
@@ -25,7 +25,7 @@ class StartupStatus:
         content = Group(
             Text("◆ mlx-chat", style=f"bold {ACCENT}"),
             Text(short_model(self.model), style="bold"),
-            Text("Local intelligence · Apple Silicon", style="dim"),
+            Text("Local MLX inference · Apple Silicon", style="dim"),
             Text(""),
             Spinner("dots", text=Text(message, style=MUTED), style=ACCENT),
         )

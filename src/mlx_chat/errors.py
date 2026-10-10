@@ -1,4 +1,4 @@
-"""Friendly application errors."""
+"""Application errors."""
 
 
 class MlxChatError(Exception):

@@ -1,4 +1,4 @@
-"""Dependency-free CPU/RAM snapshots used in the terminal's response metrics."""
+"""Process CPU and resident memory."""
 
 from __future__ import annotations
 

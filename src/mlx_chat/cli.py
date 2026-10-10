@@ -1,4 +1,4 @@
-"""Command-line entry point for mlx-chat."""
+"""mlx-chat command line."""
 
 from __future__ import annotations
 
@@ -88,6 +88,9 @@ def add_runtime_options(parser: argparse.ArgumentParser, *, positional_model: bo
     parser.add_argument("--top-k", type=int, help="Top-k sampling threshold")
     parser.add_argument("--min-p", type=float, help="Minimum probability sampling threshold")
     parser.add_argument("--max-tokens", type=int, help="Maximum generated tokens")
+    parser.add_argument(
+        "--profile", help="Generation profile: default, coding, writing, or a saved name"
+    )
     parser.add_argument("--system", dest="system_prompt", help="System prompt")
     parser.add_argument("--startup-timeout", type=int, help="Server startup timeout in seconds")
     parser.add_argument("--request-timeout", type=int, help="Generation timeout in seconds")
@@ -115,7 +118,7 @@ def add_runtime_options(parser: argparse.ArgumentParser, *, positional_model: bo
 def build_parser() -> argparse.ArgumentParser:
     parser = HelpfulParser(
         prog="mlx-chat",
-        description="Beautiful local MLX inference on your Mac.",
+        description="Terminal chat with local MLX models on Apple Silicon.",
         epilog=(
             "Short form: `mlx-chat [MODEL]` starts the server and opens chat. "
             "Run `mlx-chat stop` to stop every server managed by this app."
@@ -126,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = subparsers.add_parser("chat", help="Start/reuse a server and open interactive chat")
     add_runtime_options(chat)
+    chat.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Attach text file/project context to the next prompt; repeatable",
+    )
     chat.add_argument("--session", help="Load or create an auto-saved session")
     chat.add_argument("--ephemeral", action="store_true", help="Stop the server when chat exits")
     chat.add_argument("--attach", action="store_true", help="Require an already-running server")
@@ -142,6 +152,13 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="Run one prompt and exit")
     run.add_argument("prompt", help="Prompt text, or - to read standard input")
     add_runtime_options(run)
+    run.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Attach text file/project context; repeatable",
+    )
     run.add_argument("--json", action="store_true", help="Print structured JSON")
     run.add_argument(
         "--show-reasoning", action="store_true", help="Include reasoning in human output"
@@ -173,7 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("-n", "--lines", type=int, default=80, help="Number of lines")
     logs.add_argument("-f", "--follow", action="store_true", help="Follow new output")
 
-    models = subparsers.add_parser("models", help="List locally cached MLX models")
+    models = subparsers.add_parser("models", help="List locally cached Hugging Face models")
     models.add_argument("--json", action="store_true", help="Print structured JSON")
 
     doctor = subparsers.add_parser("doctor", help="Check this Mac and installation")
@@ -205,11 +222,15 @@ def normalize_argv(argv: Sequence[str]) -> list[str]:
 
 def settings_from_args(args: argparse.Namespace) -> Settings:
     settings = load_settings()
+    if getattr(args, "profile", None):
+        from .profiles import apply_profile
+
+        settings = apply_profile(args.profile, settings)
     positional = getattr(args, "model", None)
     flagged = getattr(args, "model_flag", None)
-    model = flagged or positional or os.environ.get("MLX_CHAT_MODEL")
-    if model:
-        model = resolve_model_preset(model)
+    model = resolve_model_preset(
+        flagged or positional or os.environ.get("MLX_CHAT_MODEL") or settings.model
+    )
     server_args = getattr(args, "mlx_arg", None)
     settings = settings.merged(
         model=model,
@@ -350,8 +371,7 @@ def ensure_server(
             )
         return result
     except (Exception, KeyboardInterrupt) as original_error:
-        # A completed StartResult gives us an exact PID. If start() itself was
-        # interrupted, ServerManager cleans only the Popen child it owns.
+        # ServerManager handles interrupts before a StartResult is available.
         _stop_new_server(settings, result, grace=2)
         if previous_settings is not None:
             try:
@@ -365,9 +385,26 @@ def ensure_server(
 
 
 def run_chat(args: argparse.Namespace) -> int:
+    from .attachments import attachment_prompt, read_attachments
     from .chat import ChatApp
+    from .profiles import PROFILE_FIELDS
 
     settings = settings_from_args(args)
+    attachments = read_attachments(args.file) if args.file else []
+    if attachments:
+        select_context(
+            [
+                *system_messages(settings),
+                {"role": "user", "content": attachment_prompt("", attachments)},
+            ],
+            settings,
+        )
+    override_fields = (
+        set(PROFILE_FIELDS)
+        if args.profile
+        else {key for key in PROFILE_FIELDS if getattr(args, key, None) is not None}
+    )
+    generation_overrides = {key: getattr(settings, key) for key in override_fields}
     plain = args.plain or is_plain_terminal()
     console = Console(no_color=plain)
     result = ensure_server(
@@ -382,6 +419,8 @@ def run_chat(args: argparse.Namespace) -> int:
             result,
             session_name=args.session,
             plain=plain,
+            attachments=attachments,
+            generation_overrides=generation_overrides,
         )
     except (Exception, KeyboardInterrupt):
         _stop_new_server(settings, result, grace=2)
@@ -398,6 +437,10 @@ def run_once(args: argparse.Namespace) -> int:
     prompt = sys.stdin.read() if args.prompt == "-" else args.prompt
     if not prompt.strip():
         raise MlxChatError("Prompt cannot be empty.")
+    if args.file:
+        from .attachments import attachment_prompt, read_attachments
+
+        prompt = attachment_prompt(prompt, read_attachments(args.file))
     messages = system_messages(settings)
     messages.append({"role": "user", "content": prompt})
     messages = select_context(messages, settings).messages
@@ -433,6 +476,8 @@ def run_once(args: argparse.Namespace) -> int:
                 print(sanitize_terminal_text(result.reasoning).rstrip())
                 print("\nAnswer\n------")
             print(sanitize_terminal_text(result.answer).rstrip())
+        if result.finish_reason == "cancelled":
+            return 130
         if result.finish_reason == "length" and result.reasoning and not result.answer:
             return 5
         return 0
@@ -616,7 +661,7 @@ def cached_models() -> list[str]:
             if repo.repo_type == "model" and repo.repo_id:
                 models.add(str(repo.repo_id))
     except Exception:
-        # Fallback is deliberately conservative and does not import MLX.
+        # Read cache directory names if the Hub scanner is unavailable.
         root = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
         if root.exists():
             for item in root.glob("models--*--*"):

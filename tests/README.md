@@ -1,64 +1,73 @@
-# Test suite guide
+# Tests
 
-Tests use `pytest` and are intentionally split by module. Run them from the
-project root:
+From the repository root:
 
-```bash
-uv sync --locked --extra dev
+```sh
+uv sync --locked --python 3.11 --extra dev
 uv build
 uv run --no-sync pytest
 ```
 
-Run one file or test while working on a feature:
+For optional dependencies, include `--extra voice --extra web` in the sync.
+Select tests with normal pytest arguments:
 
-```bash
-uv run pytest tests/test_chat.py
-uv run pytest tests/test_cli.py -k preset
+```sh
+uv run --no-sync pytest tests/test_chat.py
+uv run --no-sync pytest tests/test_server.py -k identity
 ```
 
-## Test map
+## Coverage
 
-| File | Covers |
+| Module | Tests |
 | --- | --- |
-| `test_cli.py` | Argument parsing, model aliases, settings resolution, config keys, and one-off concise prompts. |
-| `test_config.py` | Validation, saved configuration, sessions, and filesystem-safe names. |
-| `test_client.py` | API payloads, malformed responses, streaming events, reasoning splitting, and result metrics. |
-| `test_chat.py` | Slash commands, transactional settings/session changes, and endpoint health. |
-| `test_ui.py` | Terminal sanitization, plain output, input editing, and presentation helpers. |
-| `test_conversation.py` | Streaming, scrolling, static previews, selection, and keyboard controls. |
-| `test_server.py` | Managed-server records, health checks, process identity, and shutdown safety. |
-| `test_lifecycle.py` | Start, reuse, switching, restoration, interrupted initialization, and ephemeral cleanup. |
-| `test_web.py` | Search input validation and safe bounded web context. |
-| `test_tts.py` | Text cleanup, English Kokoro speech, errors, and playback cancellation. |
-| `test_resources.py` | CPU/RAM snapshots and unavailable process metrics. |
-| `test_context.py` | Request budgeting, complete-turn retention, and oversized prompts. |
-| `test_sessions.py` | Saved-state validation, historical metrics, and result restoration. |
-| `test_integration.py` | Real localhost SSE, cancellation, timeouts, CLI processes, safe dummy-child lifecycle, and wheel imports. |
-| `test_setup.py` | Text-only installer defaults and explicit voice/web extras. |
+| CLI and installation | `test_cli.py`, `test_setup.py` |
+| Settings/storage | `test_config.py` |
+| Chat commands/state | `test_chat.py` |
+| API events/reasoning/metrics | `test_client.py` |
+| Server identity/shutdown/recovery | `test_server.py`, `test_lifecycle.py` |
+| Input and full-screen behavior | `test_ui.py`, `test_conversation.py` |
+| Context budgets and saved results | `test_context.py`, `test_sessions.py` |
+| File snapshots and generation profiles | `test_attachments.py`, `test_profiles.py` |
+| Search snippets | `test_web.py` |
+| Voice and speech cleanup/stop controls | `test_voice.py`, `test_tts.py` |
+| Process resource samples | `test_resources.py` |
+| Local HTTP, CLI processes, real dummy-child ownership, wheel imports | `test_integration.py` |
 
-`conftest.py` points imports at this source checkout. Tests that write application
-state isolate it through `MLX_CHAT_HOME`, so they do not overwrite real sessions
-or configuration. Text-only installations can omit `--extra voice`; tests that
-need optional audio libraries skip. Add `--extra voice --extra web` for a full
-installation. GitHub checks exercise both installations.
+Tests import the source checkout through `conftest.py`. Tests that write app data
+set `MLX_CHAT_HOME` to a temporary directory. Keep this isolation when adding tests.
+Audio/network/model interfaces are mocked except for the local fixtures below.
 
-Build the wheel before running the full suite (`uv build`). The packaging smoke
-test extracts that wheel into a temporary installation and imports it outside
-the checkout. It skips if no wheel is available. CI builds before running tests.
-Local integration tests require permission to bind a loopback port, inspect
-process identity, and signal the exact dummy child created by the test. They do
-not start an inference server or access external network services.
+## Integration fixtures
 
-## Adding a test
+A loopback HTTP server exercises SSE, headers, stalled/partial events, timeouts,
+disconnects, request payloads, and CLI stdout/exit codes. It contacts no external
+service. A dummy Python child verifies process identity and shutdown; it runs no
+inference server. Tests use direct and symlinked interpreters because OS process
+listings can show a resolved executable name.
 
-1. Put the test in the file for the module whose public behavior changes.
-2. Mock process, network, microphone, or server interactions; tests must not
-   download models, open a microphone, or start a real MLX server.
-3. Cover success and an important failure or boundary case.
-4. Run formatting, linting, and the full suite before finishing:
+These tests require permission to bind a loopback port, inspect process details,
+and signal the exact child created by the fixture. A restricted sandbox needs
+those permissions for the full suite.
 
-```bash
-uv run ruff check src tests
-uv run ruff format --check src tests
-uv run pytest
+The wheel smoke test extracts the newest built wheel into a temporary installation
+and imports it outside the checkout. It also checks optional-dependency metadata.
+Build first so an old wheel is not tested. Without a wheel the smoke test skips;
+CI builds before running pytest.
+
+## Limits and conventions
+
+Tests do not download weights, perform inference, record a microphone, or play
+sound. Device behavior, model quality, and inference speed need separate manual
+checks. Optional audio tests can skip without their dependencies.
+
+Test public behavior and a useful failure/boundary case. Use a local fixture when
+process or transport behavior matters; mock external services and devices. Avoid
+sleep-only assertions where a readiness event or the app's render loop can be
+observed. Keep fixture cleanup in `finally` blocks so failures leave no children.
+
+```sh
+uv run --no-sync ruff check src tests
+uv run --no-sync ruff format --check src tests
+uv build
+uv run --no-sync pytest
 ```

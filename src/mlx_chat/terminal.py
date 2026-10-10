@@ -1,4 +1,4 @@
-"""Terminal text and bounded macOS clipboard helpers."""
+"""Terminal text and clipboard."""
 
 import os
 import re

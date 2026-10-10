@@ -1,4 +1,4 @@
-"""Small dependency-free client for the MLX-LM OpenAI-compatible API."""
+"""MLX-LM chat client."""
 
 from __future__ import annotations
 
@@ -37,7 +37,9 @@ class GenerationResult:
     @property
     def completion_tokens(self) -> int | None:
         value = self.usage.get("completion_tokens")
-        return int(value) if isinstance(value, int) else None
+        return (
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        )
 
     @property
     def tokens_per_second(self) -> float | None:

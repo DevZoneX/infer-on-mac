@@ -1,4 +1,4 @@
-"""Restrained graphite palette shared by the terminal surfaces."""
+"""Terminal colors."""
 
 CANVAS = "#090b0d"
 SURFACE = "#15191d"

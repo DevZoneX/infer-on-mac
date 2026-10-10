@@ -150,9 +150,7 @@ def _write_registry_unlocked(records: list[ServerRecord]) -> None:
 def process_alive(pid: int) -> bool:
     if pid <= 1:
         return False
-    # Reap the process when it is our own child. Without this, a server stopped
-    # from the same launcher can remain a zombie and `kill(pid, 0)` reports it
-    # as alive forever.
+    # Reap our children so zombies do not pass kill(pid, 0).
     try:
         waited, _status = os.waitpid(pid, os.WNOHANG)
         if waited == pid:
@@ -189,7 +187,7 @@ def process_command(pid: int) -> str:
         return ""
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             timeout=2,
@@ -217,8 +215,7 @@ def process_start_identity(pid: int) -> str:
 
 def record_matches_process(record: ServerRecord) -> bool:
     """Guard against signaling a PID that the OS has recycled."""
-    # Old registry entries did not carry an OS start stamp. Treat them as
-    # untrusted instead of risking a signal to a recycled PID.
+    # A start stamp is required to distinguish recycled PIDs.
     if not record.process_identity:
         return False
     command = process_command(record.pid)
@@ -241,11 +238,17 @@ def record_matches_process(record: ServerRecord) -> bool:
         arguments[index : index + 3] == ["-m", "mlx_lm", "server"]
         for index in range(max(0, len(arguments) - 2))
     )
-    configured_executable = bool(
+    same_interpreter = False
+    executable_names = {Path(record.command[0]).name} if record.command else set()
+    if record.command and arguments:
+        with contextlib.suppress(OSError):
+            same_interpreter = Path(arguments[0]).samefile(record.command[0])
+        with contextlib.suppress(OSError):
+            executable_names.add(Path(record.command[0]).resolve(strict=True).name)
+    configured_executable = same_interpreter or bool(
         record.command
         and any(
-            item == record.command[0] or Path(item).name == Path(record.command[0]).name
-            for item in arguments
+            item == record.command[0] or Path(item).name in executable_names for item in arguments
         )
     )
     if not (official_command or configured_executable):
@@ -296,9 +299,7 @@ def _same_server_instance(current: ServerRecord, target: ServerRecord) -> bool:
         return current.instance_id == target.instance_id
     if target.process_identity:
         return current.process_identity == target.process_identity
-    # Compatibility for registry records written before ownership tokens were
-    # introduced. Avoid deleting a different record merely because its PID was
-    # recycled.
+    # Old records lack an instance token; compare their launch metadata.
     return (
         current.started_at == target.started_at
         and current.host == target.host
@@ -399,9 +400,7 @@ class ServerManager:
                 if ready_check is not None:
                     ready_check(result)
             except BaseException:
-                # Keep health + first-generation validation atomic for other
-                # launchers. No waiter can reuse this server before a failed
-                # owner warm-up has cleaned up its exact process.
+                # Hold the endpoint lock through warm-up and failure cleanup.
                 self._cleanup_failed_start(result)
                 raise
             return result
@@ -412,7 +411,7 @@ class ServerManager:
         progress: Callable[[str], None] | None = None,
         ready_check: Callable[[StartResult], None] | None = None,
     ) -> StartResult:
-        """Attach to a healthy endpoint without ever spawning a process."""
+        """Attach to an existing healthy endpoint."""
 
         progress = progress or (lambda _message: None)
         with _endpoint_lock(self.settings.port, progress):
@@ -591,9 +590,7 @@ class ServerManager:
                 f"See {log_path}."
             )
         except BaseException:
-            # This Popen object is proof of exact ownership. Cleaning the child
-            # here avoids both orphaning it on Ctrl-C and ever guessing from a
-            # registry snapshot that may have been replaced by another launcher.
+            # Clean up the child from this Popen, not a newer registry entry.
             _stop_spawned_child(process, record)
             raise
 
@@ -625,9 +622,7 @@ def _stop_spawned_child(
                 with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                     os.killpg(record.pgid, signal.SIGKILL)
                 wait_for_exit(2.0)
-    # Keep a stubborn child registered so `mlx-chat stop` can retry. Registry
-    # removal is ownership-aware and only happens after the exact Popen child
-    # is confirmed gone.
+    # Keep the record if shutdown failed so a later stop command can retry.
     if process.poll() is not None:
         _remove_record(record)
 
@@ -651,7 +646,7 @@ def stop_record(record: ServerRecord, *, grace: float = 8.0) -> StopResult:
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                 os.kill(record.pid, sig)
 
-    # SIGINT lets MLX-LM shut down its HTTP and generation threads cleanly.
+    # Try graceful shutdown before TERM/KILL.
     send(signal.SIGINT)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline and process_alive(record.pid):

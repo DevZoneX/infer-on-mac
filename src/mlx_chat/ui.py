@@ -1,4 +1,4 @@
-"""Rich and prompt-toolkit terminal presentation."""
+"""Terminal input and chat controls."""
 
 from __future__ import annotations
 
@@ -111,23 +111,23 @@ class TerminalUI(GenerationPresentation):
             event.current_buffer.insert_text(event.data)
 
         @bindings.add("escape", "enter")
-        def _newline(event) -> None:  # type: ignore[no-untyped-def]
+        def _newline(event) -> None:
             event.current_buffer.insert_text("\n")
 
         @bindings.add("escape")
-        def _stop(event) -> None:  # type: ignore[no-untyped-def]
+        def _stop(event) -> None:
             event.app.exit(result="/stop")
 
         @bindings.add("c-l")
-        def _clear(event) -> None:  # type: ignore[no-untyped-def]
+        def _clear(event) -> None:
             event.app.renderer.clear()
 
         @bindings.add("f1")
-        def _voice(event) -> None:  # type: ignore[no-untyped-def]
+        def _voice(event) -> None:
             event.app.exit(result="/voice")
 
         @bindings.add("f2")
-        def _speak(event) -> None:  # type: ignore[no-untyped-def]
+        def _speak(event) -> None:
             event.app.exit(result="/speak")
 
         prompt_style = PromptStyle.from_dict(
@@ -327,6 +327,8 @@ class TerminalUI(GenerationPresentation):
         for message in messages:
             if message["role"] == "user":
                 self.user_message(message["content"])
+                if message.get("attachments"):
+                    self.info("Attached excerpts: " + ", ".join(message["attachments"]))
             else:
                 result = result_from_message(message)
                 self.final_generation(result, think=bool(result.reasoning), historical=True)
@@ -337,9 +339,11 @@ class TerminalUI(GenerationPresentation):
         panel = self._conversation.pending
         self._conversation.audio_key = stop_key
         try:
-            return self._conversation.generate(
+            result = self._conversation.generate(
                 lambda callback: operation(self._conversation.cancelled), lambda _: panel
             )
+            self._conversation.finish_audio()
+            return result
         finally:
             self._conversation.audio_key = None
 
@@ -356,7 +360,7 @@ class TerminalUI(GenerationPresentation):
     def audio_status(self, value: str):
         if getattr(self, "_conversation", None) is not None:
             return self._conversation.status(value, user=value.startswith("/voice"))
-        # Put the animation in the panel's content row, between its borders.
+        # Keep the spinner inside the message panel.
         spinner = Spinner("dots", text=Text(sanitize_terminal_text(value)), style=ACCENT)
         panel = self.chat_panel(Text(value))
         panel.renderable = self.message_content(spinner)
@@ -442,9 +446,7 @@ class TerminalUI(GenerationPresentation):
             self.console.clear()
             return
 
-        # Match macOS' `clear` command: erase scrollback, move home, then
-        # erase the visible viewport. Rich's Console.clear() omits E3, which
-        # leaves the previous conversation reachable in terminal scrollback.
+        # Rich's clear() does not erase terminal scrollback (E3).
         output.write("\x1b[3J\x1b[H\x1b[2J")
         output.flush()
 
@@ -458,6 +460,15 @@ class TerminalUI(GenerationPresentation):
         table.add_column("Command", no_wrap=True)
         table.add_column("What it does")
         rows = [
+            (
+                "/attach [PATH ...]",
+                "Attach text files/project excerpts to the next prompt, or list them",
+            ),
+            ("/detach", "Clear pending file attachments"),
+            (
+                "/profile [NAME|save NAME|delete NAME]",
+                "Apply, save, delete, or list generation profiles",
+            ),
             ("/web QUERY", "Search the web and generate an answer with source links"),
             ("/think [on|off|toggle]", "Control Qwen thinking on future turns"),
             ("/concise [on|off|toggle]", "Prefer fast, brief direct answers"),

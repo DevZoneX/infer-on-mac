@@ -1,4 +1,4 @@
-"""Terminal stop keys while blocking audio operations are active."""
+"""Audio stop-key handling."""
 
 from __future__ import annotations
 

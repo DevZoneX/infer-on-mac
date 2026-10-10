@@ -209,3 +209,60 @@ def test_cli_import_does_not_load_optional_backends():
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == []
+
+
+def test_profile_precedence_keeps_model_and_respects_explicit_flags(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "load_settings",
+        lambda: Settings(
+            model="active/model",
+            port=8123,
+            temperature=0.9,
+            think=True,
+        ),
+    )
+    monkeypatch.delenv("MLX_CHAT_MODEL", raising=False)
+    settings = cli.settings_from_args(
+        parse_runtime(
+            "--profile",
+            "coding",
+            "--temperature",
+            "0.4",
+            "--think",
+        )
+    )
+    assert settings.model == "active/model"
+    assert settings.port == 8123
+    assert settings.temperature == 0.4
+    assert settings.think is True
+    assert "practical coding help" in settings.system_prompt
+
+
+def test_missing_one_off_file_is_rejected_before_server_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "load_settings", Settings)
+    monkeypatch.setattr(cli, "ensure_server", lambda *a, **kw: pytest.fail("Must not start"))
+    with pytest.raises(MlxChatError, match="Could not attach"):
+        cli.run_once(parse_runtime("run", "Explain", "--file", str(tmp_path / "missing")))
+
+
+def test_saved_model_alias_is_resolved_at_launch(monkeypatch):
+    monkeypatch.setattr(cli, "load_settings", lambda: Settings(model="small"))
+    monkeypatch.delenv("MLX_CHAT_MODEL", raising=False)
+    assert cli.settings_from_args(parse_runtime()).model == MODEL_PRESETS["small"]
+
+
+def test_cancelled_one_off_keeps_partial_output_and_returns_130(monkeypatch, capsys):
+    import json
+
+    from mlx_chat.client import GenerationResult
+
+    monkeypatch.setattr(cli, "load_settings", Settings)
+    monkeypatch.setattr(cli, "ensure_server", lambda *args, **kw: None)
+    monkeypatch.setattr(
+        cli.ChatClient,
+        "collect",
+        lambda *args, **kw: GenerationResult(answer="partial", finish_reason="cancelled"),
+    )
+    assert cli.run_once(parse_runtime("run", "question", "--json")) == 130
+    assert json.loads(capsys.readouterr().out)["answer"] == "partial"

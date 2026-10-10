@@ -1,4 +1,4 @@
-"""Validate saved conversation state and reconstruct response metadata."""
+"""Saved conversations and response metrics."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ SESSION_SETTINGS = (
     "min_p",
     "max_tokens",
     "context_tokens",
+    "repetition_penalty",
 )
 
 
@@ -95,6 +96,13 @@ def restore_session(payload: dict[str, Any], settings: Settings) -> RestoredSess
             not isinstance(message, dict)
             or message.get("role") not in ("user", "assistant")
             or not isinstance(message.get("content"), str)
+            or (
+                "attachments" in message
+                and (
+                    not isinstance(message["attachments"], list)
+                    or not all(isinstance(path, str) for path in message["attachments"])
+                )
+            )
             or any(
                 key in message and not isinstance(message[key], str)
                 for key in ("api_content", "reasoning")

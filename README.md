@@ -1,367 +1,204 @@
 # mlx-chat
 
-`mlx-chat` is a local terminal chat app for Apple Silicon Macs. It starts an
-MLX-LM server for you, streams Markdown answers, and keeps conversations on
-your Mac.
+Terminal chat with local MLX models on Apple Silicon Macs. `mlx-chat` starts an
+MLX-LM server, streams answers, and saves conversations when you ask it to.
 
-```text
-install → mlx-chat medium → type or speak → /stop when finished
-```
+The default installation supports text chat. Voice input, speech output, and
+web search are optional. File context and prompt profiles need no extra packages.
 
-## Demo
+## Requirements
 
-[![mlx-chat demo: local chat and voice controls](assets/demo-preview.gif)](assets/demo-muted.mp4)
+- An Apple Silicon Mac running macOS 14 or newer
+- Python 3.11 or newer; the installer uses Python 3.11 when `uv` is available
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) recommended
+- Disk space and unified memory for your chosen model
 
-[Watch the full demo in good quality](assets/demo-muted.mp4).
-
-## What you need
-
-- An Apple Silicon Mac (M1 or newer) running macOS
-- Python 3.11 or newer
-- [`uv`](https://docs.astral.sh/uv/) recommended; `setup.sh` also supports a normal virtual environment
-- Enough disk space and unified memory for the model you choose
-
-Inference is local. The first use of a model downloads its weights from Hugging Face.
+Intel Macs, Linux, and Windows are not supported for inference. Model size,
+conversation length, and other running apps all affect memory use.
 
 ## Install
 
-Download or clone this repository, then open a terminal in its directory.
-The project requires Apple Silicon; Intel Macs, Linux, and Windows are not
-supported for inference.
-
-From the project directory:
-
-```bash
-chmod +x setup.sh mlx-chat
+```sh
+git clone https://github.com/DevZoneX/infer-on-mac.git
+cd infer-on-mac
 ./setup.sh
 ```
 
-The default install is text-only. Add optional features when you need them:
+The installer creates `.venv` and links `mlx-chat` into `~/.local/bin`. If that
+directory is not on your `PATH`, use `./mlx-chat` from the checkout or add:
 
-```bash
-./setup.sh --voice       # microphone input and speech output
-./setup.sh --web         # /web search
-./setup.sh --voice --web # both
+```sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The installer adds `mlx-chat` to `~/.local/bin`. If it is not immediately
-available in a new terminal, restart that terminal or add `~/.local/bin` to
-your `PATH`.
+Optional features:
 
-For text-only use without audio dependencies:
-
-```bash
-uv sync --locked --python 3.11
-uv run --no-sync mlx-chat small
+```sh
+./setup.sh --voice
+./setup.sh --web
+./setup.sh --voice --web
 ```
 
-For development with all optional features:
+Pass every extra you want to keep when rerunning the installer. `uv sync` removes
+optional packages that were not selected. For voice transcription, also install
+[FFmpeg](https://ffmpeg.org/); with Homebrew, use `brew install ffmpeg`.
 
-```bash
-uv sync --locked --python 3.11 --extra dev --extra voice --extra web
-```
+See the [installation reference](docs/REFERENCE.md#installation) for direct `uv`
+and `pip` commands, custom installation paths, and updating the checkout.
 
-## Start chatting
+## Start a conversation
 
-For a 48 GB M4 Max, start with the medium preset:
-
-```bash
-mlx-chat medium
-```
-
-The default system prompt tailors answers to an Apple Silicon MacBook, macOS,
-and zsh. Use `/system TEXT` to replace it or `/system clear` to restore the default.
-
-The conversation stays in a scrollable view above the fixed input box.
-Scroll with the mouse wheel or Page Up / Page Down. Scrolling up pauses automatic
-following while an answer streams; return to the bottom or press Ctrl+End to
-follow new text again.
-
-Use `mlx-chat medium --plain` for a simpler terminal experience. It prints each
-completed response once, without animated rendering or the full-screen view.
-
-Type a question and press Enter. The first launch can take a while because it
-downloads and loads the model. Later launches reuse the local model server when
-possible.
-
-When you are done and want to release model memory:
-
-```text
-/stop
-```
-
-`/exit` leaves the server running; `/stop` shuts it down and releases memory.
-At the input prompt, `Fn+Esc` (or plain `Esc`) runs `/stop`. Terminals do not
-provide a separate Fn modifier for Escape. `Esc+Enter` still inserts a newline.
-
-## Choose a model
-
-Three size presets make model selection easy. The `tiny` alias selects the
-default 4B model:
-
-| Alias | Model | Best for | Notes |
-| --- | --- | --- | --- |
-| `small` | `mlx-community/Qwen3-8B-4bit` | Fast everyday questions and light coding | Best responsiveness. |
-| `medium` | `mlx-community/Qwen3-30B-A3B-4bit` | Default choice for a 48 GB M4 Max | MoE: strong quality with only ~3B active parameters per token. |
-| `large` | `mlx-community/Llama-3.3-70B-Instruct-4bit` | Harder writing and reasoning | About 40 GB of weights; close other heavy apps and keep context modest. |
-
-Launch one directly:
-
-```bash
+```sh
 mlx-chat small
+```
+
+The first launch downloads the model from Hugging Face. Later launches use the
+cache and reuse a compatible running server when available.
+
+Type a message and press Enter. Use `/help` for commands. The normal interface
+supports scrolling and streamed Markdown. `--plain` displays completed responses
+without the full-screen view.
+
+```text
+/save notes
+/exit
+```
+
+`/save notes` creates a named session; named sessions save after completed turns.
+`/exit` leaves the model server running. Use `/stop` instead to shut down the
+managed server, or run `mlx-chat stop` from another terminal.
+
+An unnamed conversation is not saved automatically. Load a saved session with
+`mlx-chat --session notes` or `/load notes`.
+
+## Model shortcuts
+
+| Shortcut | Model repository |
+| --- | --- |
+| `tiny` (default) | `mlx-community/Qwen3-4B-4bit` |
+| `small` | `mlx-community/Qwen3-8B-4bit` |
+| `medium` | `mlx-community/Qwen3-30B-A3B-4bit` |
+| `large` | `mlx-community/Llama-3.3-70B-Instruct-4bit` |
+
+These are shortcuts, not automatic memory-fit checks. You can also supply an
+MLX-compatible Hugging Face model ID or a local MLX model directory.
+
+```sh
 mlx-chat medium
-mlx-chat large
+mlx-chat /path/to/mlx-model
 ```
 
-Or switch during a conversation:
+Use `/model small` to switch during chat. The model cards describe each model's
+requirements and license. The app's license does not cover downloaded weights.
+
+## Files and profiles
+
+Attach a text file or a directory to the next message:
 
 ```text
-/model medium
+/attach src/mlx_chat/client.py
+Explain how streaming works.
+/profile coding
+/attach src/mlx_chat
+Suggest a focused refactor of the attached code.
 ```
 
-You can also pass any MLX-compatible Hugging Face model or a local model path:
+Attachments are read-only excerpts. The app lists included files, marks clipped
+files, and keeps their snapshots in the conversation. It does not execute code
+or index the whole project. `/attach` lists pending files; `/detach` clears them.
 
-```bash
-mlx-chat mlx-community/Mistral-Small-24B-Instruct-2501-4bit
-mlx-chat /path/to/local-mlx-model
-```
-
-The built-in default remains `mlx-community/Qwen3-4B-4bit` when no model is specified.
-
-## Speak instead of typing
-
-Voice input is fully local and optional. Install it with `./setup.sh --voice`,
-or add the dependencies to your environment:
-
-```bash
-uv sync --extra voice
-brew install ffmpeg
-```
-
-Then, in chat:
-
-1. Press `F1` to start voice input and speak normally.
-2. Recording stops automatically after about 1.2 seconds of silence following speech.
-   Press `F3` to finish sooner (`Ctrl-C` also works).
-3. `/voice` remains available as an alternative to the shortcut.
-
-On MacBooks where function keys control hardware, hold `Fn` when pressing `F1`–`F3`.
-
-Voice uses `mlx-community/whisper-large-v3-turbo`, which loads on the first voice
-prompt by default. Text chat starts without loading Whisper. The first
-transcription can take longer while its model downloads or loads.
-
-To have voice ready at startup, use `mlx-chat medium --preload-voice`, or save
-that preference with `mlx-chat config set preload-voice on`. Use
-`--no-preload-voice` to override the saved preference. Its ready state appears
-in the chat panel. macOS may ask for microphone permission. Audio and
-transcription stay on the Mac.
-
-## Hear model answers
-
-Use `/speak` or `F2` to read the latest answer in English with local
-`mlx-community/Kokoro-82M-bf16` and its `af_heart` voice. The model loads on
-first use and is reused afterward. Press `F3` (or `Ctrl-C`) to stop playback.
-Emoji, model tokens, Markdown formatting, URLs, and fenced code are omitted.
-Only one English speech model is used. FFmpeg is needed for microphone
-transcription, not speech output. On first use, Kokoro may also download its
-English phonemizer data; synthesis stays local afterward.
+Profiles set instructions and generation settings without switching the model:
 
 ```text
-/speak
-/speak reasoning
-/speak all
+/profile writing
+/system Help edit technical documentation.
+/profile save docs
+/profile docs
 ```
 
-## Everyday controls
+The built-in profiles are `default`, `coding`, and `writing`. See
+[file context](docs/REFERENCE.md#file-and-project-context) for selection limits
+and [profiles](docs/REFERENCE.md#prompt-profiles) for custom presets.
 
-| What you want | Command or key |
-| --- | --- |
-| A fast, brief answer | `/concise on` |
-| More deliberate reasoning | `/think on` |
-| Change model | `/model small`, `/model medium`, or `/model large` |
-| Start voice input | `F1` or `/voice` |
-| Stop voice input | `F3` or `Ctrl-C` |
-| Read the latest answer aloud | `F2` or `/speak` |
-| Stop speaking | `F3` or `Ctrl-C` |
-| Retry the last answer | `/retry` |
-| Remove the latest turn | `/undo` |
-| Start fresh | `/new` or `/reset` |
-| Save / load a conversation | `/save NAME` / `/load NAME` |
-| Show server and model details | `/status` |
-| Shut down and free memory | `Fn+Esc` / `Esc` or `/stop` |
+## One-off prompts
 
-Useful keys: `Tab` completes commands, `Esc`+`Enter` inserts a newline,
-`Ctrl-L` clears the display, and `Ctrl-D` exits while leaving the server running.
-
-Every completed response includes elapsed time, time-to-first-token, throughput,
-and the active server's CPU and RAM use. Markdown and links render while the
-response streams.
-
-Loading a session displays its saved turns and restores the latest answer for
-`/speak` and `/stats`. `/undo` restores the preceding answer and updates the
-display. Historical responses show their saved generation metrics, without
-attaching the server's current CPU or RAM use.
-
-Ctrl-C cancels generation even while the server is loading a response or has
-stopped sending tokens. Any answer text received so far is retained.
-
-## Commands
-
-Type `/help` in chat for the same guide.
-
-| Command | Purpose |
-| --- | --- |
-| `/web QUERY` | Search the web explicitly, then answer with linked citations (requires the `web` extra). |
-| `/think [on\|off\|toggle]` | Control reasoning mode. |
-| `/concise [on\|off\|toggle]` | Prefer short, direct answers and skip thinking. |
-| `/voice [SECONDS]` | Record a local voice prompt; default maximum is 30 seconds. |
-| `/speak [answer\|reasoning\|all]` | Read the latest result in English with Kokoro. |
-| `/new [NAME]`, `/reset`, `/clear` | Start fresh, clear context, or clear only the screen. |
-| `/system [TEXT\|@FILE\|clear]` | Show, set, load, or clear a system prompt. |
-| `/retry`, `/undo` | Regenerate or remove the latest turn. |
-| `/settings`, `/stats`, `/status` | Inspect settings, the latest generation, or server state. |
-| `/model [MODEL]` | Show or switch the active model. |
-| `/save NAME`, `/load NAME`, `/sessions` | Manage saved conversations. |
-| `/history [N]`, `/copy`, `/export` | Inspect, copy, or export your chat. |
-| `/logs [N]`, `/restart` | Inspect logs or restart the managed server. |
-| `/stop`, `/exit` | Stop the server and exit, or just exit. |
-
-To send text that begins with `/`, prefix it with another slash: `//example`.
-
-## One-off prompts and server mode
-
-Generate once without entering chat:
-
-```bash
-mlx-chat run "Explain unified memory in three sentences."
-mlx-chat run "Write a release checklist." --json
-mlx-chat run "Explain how this works briefly." --concise
+```sh
+mlx-chat run "Explain unified memory briefly." --concise
+mlx-chat run "Review this file." --profile coding --file src/mlx_chat/client.py
+printf '%s\n' 'Summarize this text.' | mlx-chat run - --json
 ```
 
-One-off prompts use the same default or custom system prompt as interactive chat.
-`--concise` requests a brief answer and skips thinking, including when thinking is
-enabled in saved settings.
+`--json` returns a result envelope containing the answer, reasoning, usage, and
+metrics. It does not enforce a JSON schema on the answer. Add `--ephemeral` to
+stop a server started by this invocation when it exits.
 
-Add `--ephemeral` to `chat` or `run` to stop a server started by that invocation
-when it exits. In interactive chat this also covers a replacement server started
-by `/model` or `/restart`. Reused and external servers are left running.
+## Voice and web search
 
-Run an OpenAI-compatible local server without the chat UI:
+With the `voice` extra installed, F1 starts recording and F2 reads the latest
+answer aloud. F3 stops recording or playback. Hold Fn for function keys if your
+Mac uses them for hardware controls. The models load on first use; speech output
+uses one English Kokoro voice.
 
-```bash
-mlx-chat serve medium
-# endpoint: http://127.0.0.1:8080/v1
-```
+Stopping speech fades the output to silence. Its popup closes automatically one
+second after speech finishes or F3 is pressed; Enter or Esc can dismiss it sooner.
 
-Useful server commands:
+With the `web` extra installed, `/web QUERY` sends an explicit search query to a
+search provider and gives the model the returned snippets. Normal chat does not
+perform web searches.
 
-```bash
+[Voice details](docs/REFERENCE.md#voice-input-and-speech-output) include microphone
+permissions, silence detection, playback controls, and startup preloading.
+
+## Local server
+
+```sh
+mlx-chat serve small
 mlx-chat status
 mlx-chat logs --lines 100
-mlx-chat restart medium
 mlx-chat stop
 ```
 
-Only servers started and tracked by `mlx-chat` are stopped. External MLX-LM
-servers can be reused but are never taken over or shut down by this app.
+The default endpoint is `http://127.0.0.1:8080/v1`. `--attach` requires an existing
+healthy server and prevents the app from starting one. External servers are
+reused without taking over their lifecycle.
 
-## Configuration
+See [server lifecycle](docs/REFERENCE.md#server-lifecycle) for model switching,
+ownership checks, ports, timeouts, and network binding.
 
-View persistent settings:
+## Data and privacy
 
-```bash
-mlx-chat config show
-```
-
-Set defaults for future launches:
-
-```bash
-mlx-chat config set model mlx-community/Qwen3-30B-A3B-4bit
-mlx-chat config set think on
-mlx-chat config set max-tokens 8192
-```
-
-The command-line model wins over `MLX_CHAT_MODEL`, which wins over saved
-configuration. `mlx-chat config path` shows where settings are stored, and
-`mlx-chat config reset` restores defaults. Use `mlx-chat COMMAND --help` for
-the complete command-line reference.
-
-### Long conversations and timeouts
-
-`--context-tokens` sets a context budget (default: 32768). The app reserves
-`--max-tokens` for output and an allowance for the chat template. It then keeps
-system instructions and the most recent complete turns that fit. Older turns
-are omitted only from the request; the full transcript remains available for
-saving and exporting. The UI tells you when this happens.
-
-The budget uses a conservative UTF-8 byte estimate, rather than loading a model
-tokenizer. It can retain fewer turns than an exact tokenizer would, and template
-overhead varies by model. Set the budget at or below your model's supported
-context size. An oversized latest prompt or system prompt produces a clear
-error instead of being silently shortened.
-
-```bash
-mlx-chat medium --context-tokens 32768 --max-tokens 4096
-mlx-chat config set context-tokens 32768
-```
-
-`--connect-timeout` bounds connection establishment (default: 10 seconds).
-`--request-timeout` controls inactivity while waiting for response headers or
-stream data (default: 3600 seconds). They can also be set through `config set`.
-Cancellation does not wait for either timeout to expire.
-
-## Where data lives
-
-By default, settings, sessions, input history, exports, and server logs live in:
+Settings, profiles, saved sessions, history, exports, and logs normally live in:
 
 ```text
 ~/Library/Application Support/mlx-chat/
 ```
 
-Set `MLX_CHAT_HOME` to move this directory. Model files remain in the Hugging
-Face cache (normally `~/.cache/huggingface`).
+`MLX_CHAT_HOME` changes that location. Keep it outside the source checkout.
+Model downloads use the Hugging Face cache.
 
-## Privacy and safety
+Inference and audio processing use the local server by default. Downloads and
+explicit `/web` searches require network access. Saved files are not encrypted;
+sessions with attachments include the selected file contents. A server bound to
+a network interface exposes the API to that network without authentication.
 
-- The server listens on `127.0.0.1` by default; prompts and answers stay local.
-- Voice recording and transcription are local.
-- Speech output is generated and played locally with Kokoro.
-- `/web` is the exception: its search query goes to a search provider. Full pages are not fetched.
-- First use of a model downloads weights from Hugging Face; inference is never sent to a cloud model.
-- Saved chats and logs are ordinary local files, not encrypted. Treat them as sensitive.
-- Binding the server to a network address requires `--allow-network`. Do this only on a trusted network.
+Read the [privacy reference](docs/REFERENCE.md#storage-and-network-access) and
+[security policy](SECURITY.md) before sharing sessions or exposing an endpoint.
 
-## Troubleshooting
+## Documentation and development
 
-Start here:
+- [Command and configuration reference](docs/REFERENCE.md)
+- [Troubleshooting](docs/REFERENCE.md#troubleshooting)
+- [Contributing](CONTRIBUTING.md)
+- [Source layout](src/README.md)
+- [Test suite](tests/README.md)
 
-```bash
-mlx-chat doctor
-mlx-chat status
-mlx-chat logs --lines 100
-```
+The tests cover application behavior, local HTTP streaming, process ownership,
+CLI output, installation, and package imports. They do not run model inference
+or use audio hardware. CI checks text-only and optional-feature installations.
 
-| Problem | What to do |
-| --- | --- |
-| First launch is slow | Model weights may be downloading or loading. Check `/logs 100`; use `--startup-timeout 1800` if needed. |
-| `mlx_lm.server was not found` | Run `./setup.sh` again. |
-| `/voice` says FFmpeg is missing | Run `brew install ffmpeg`. |
-| No audio is captured | Allow microphone access for the terminal in macOS Privacy & Security settings. |
-| `/speak` says speech output is not installed | Run `uv sync --extra voice`, then restart chat. |
-| `large` is unstable or slow | Close memory-heavy apps, shorten the conversation, or use `medium`. |
+The [recorded demo](assets/demo-muted.mp4) shows an earlier interface. Demo media
+stays in the repository and is excluded from package archives.
 
-## Development and license
+## License
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [the source guide](src/README.md), and
-[the test guide](tests/README.md). GitHub Actions runs lint, formatting, tests,
-and package builds for text-only and audio installations on Apple Silicon macOS.
-Tests never download inference models or use real microphones/playback.
-Integration tests use a localhost HTTP fixture and harmless dummy child
-processes to verify streaming, cancellation, CLI behavior, and server ownership.
-Demo media stays in the repository and is excluded from package archives.
-
-The application is [MIT licensed](LICENSE). Downloaded models and third-party
-dependencies have their own licenses; review them before redistributing weights.
-Model caches, virtual environments, recordings, and local chat data are not
-part of this repository. Never commit conversations, credentials, or private logs.
+[MIT](LICENSE). Models and dependencies retain their own licenses.

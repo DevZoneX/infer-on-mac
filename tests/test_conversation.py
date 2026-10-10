@@ -898,3 +898,111 @@ def test_escape_quits_with_one_key_even_when_live_help_is_open(monkeypatch, tmp_
 
         assert ui.prompt_session.prompt("", pre_run=ready) == "/stop"
         ui._conversation.dismiss_preview()
+
+
+def test_f3_speech_popup_closes_after_one_second_without_enter(monkeypatch, tmp_path):
+    import time
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "mlx_chat.ui.Console",
+        lambda **kw: Console(
+            file=io.StringIO(),
+            force_terminal=True,
+            width=80,
+            height=40,
+        ),
+    )
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        ui.enable_conversation()
+        started = time.monotonic()
+        try:
+            pipe.send_text("\x1bOR")
+            with ui.command_popup("/speak"):
+                with ui.audio_status("Speaking… F3 to stop"):
+                    assert ui.run_audio(lambda stopped: stopped.wait(2), stop_key="f3")
+                ui.info("Speech stopped.")
+            elapsed = time.monotonic() - started
+            assert 0.9 <= elapsed < 1.8
+            assert ui._conversation.popup_items is None
+            assert not ui._conversation.popup_waiting
+            assert ui._conversation._audio_popup_timer is None
+        finally:
+            ui.close_conversation()
+
+
+def test_f3_hides_popup_even_while_audio_worker_finishes(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "mlx_chat.ui.Console",
+        lambda **kw: Console(
+            file=io.StringIO(),
+            force_terminal=True,
+            width=80,
+            height=40,
+        ),
+    )
+    release = threading.Event()
+    observed = []
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        ui.enable_conversation()
+        app = ui.prompt_session.app
+
+        def operation(stopped):
+            assert stopped.wait(1)
+
+            def check():
+                observed.append(ui._conversation.popup_items is None)
+                release.set()
+
+            app.loop.call_soon_threadsafe(app.loop.call_later, 1.15, check)
+            assert release.wait(2)
+            return True
+
+        try:
+            pipe.send_text("\x1bOR")
+            started = time.monotonic()
+            with ui.command_popup("/speak"), ui.audio_status("Speaking… F3 to stop"):
+                assert ui.run_audio(operation, stop_key="f3")
+            assert observed == [True]
+            assert time.monotonic() - started < 1.8
+            assert ui._conversation.mode == "input"
+        finally:
+            release.set()
+            ui.close_conversation()
+
+
+@pytest.mark.parametrize("press_f3", [False, True])
+def test_finished_speech_popup_dismisses_automatically(monkeypatch, tmp_path, press_f3):
+    import time
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "mlx_chat.ui.Console",
+        lambda **kw: Console(
+            file=io.StringIO(),
+            force_terminal=True,
+            width=80,
+            height=40,
+        ),
+    )
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        ui = TerminalUI(Settings())
+        ui.enable_conversation()
+        try:
+            started = time.monotonic()
+            with ui.command_popup("/speak"):
+                with ui.audio_status("Speaking… F3 to stop"):
+                    ui.run_audio(lambda stopped: False)
+                ui.info("Speech finished.")
+                if press_f3:
+                    pipe.send_text("\x1bOR")
+            assert 0.9 <= time.monotonic() - started < 1.8
+            assert ui._conversation.popup_items is None
+        finally:
+            ui.close_conversation()

@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import MODEL_PRESETS, resolve_model_preset
+from .attachments import Attachment, attachment_prompt, merge_attachments, read_attachments
 from .client import ChatClient, GenerationResult
 from .commands import SLASH_COMMANDS
 from .config import (
@@ -27,6 +28,7 @@ from .config import (
 )
 from .context import DEFAULT_SYSTEM_PROMPT, select_context, system_messages
 from .errors import MlxChatError
+from .profiles import PROFILE_FIELDS, apply_profile, delete_profile, list_profiles, save_profile
 from .server import (
     ServerManager,
     StartResult,
@@ -66,6 +68,8 @@ class ChatApp:
         *,
         session_name: str | None = None,
         plain: bool = False,
+        attachments: list[Attachment] | None = None,
+        generation_overrides: dict[str, Any] | None = None,
     ):
         self.settings = settings
         self.start_result = start_result
@@ -74,13 +78,11 @@ class ChatApp:
         self.ui = TerminalUI(settings, plain=plain)
         self.web = WebSearcher(settings)
         self.transcript: list[dict[str, Any]] = []
+        self.pending_attachments: list[Attachment] = []
         self.session_name = session_name
         self.last_result: GenerationResult | None = None
         self.should_exit = False
         self.voice_ready = False
-
-        if settings.preload_voice:
-            self._preload_voice()
 
         if session_name:
             try:
@@ -88,6 +90,16 @@ class ChatApp:
             except MlxChatError as exc:
                 if "No saved session" not in str(exc):
                     raise
+
+        if generation_overrides:
+            candidate = self.settings.merged(**generation_overrides)
+            for key in generation_overrides:
+                setattr(self.settings, key, getattr(candidate, key))
+        self.pending_attachments = attachments or []
+        if self.pending_attachments:
+            self._check_attachment_budget(self.pending_attachments, self.settings)
+        if settings.preload_voice:
+            self._preload_voice()
 
     def _preload_voice(self) -> None:
         """Warm Whisper alongside the chat model without making text chat unavailable."""
@@ -126,6 +138,8 @@ class ChatApp:
         )
         if self.transcript:
             self.ui.restore_transcript(self.transcript, replace=False)
+        if self.pending_attachments:
+            self._show_attachments()
         if self.session_name:
             self.ui.info(f"Session {self.session_name!r} is active and will auto-save.")
 
@@ -160,7 +174,12 @@ class ChatApp:
     ) -> bool:
         if prompt is not None:
             item: dict[str, Any] = {"role": "user", "content": prompt, "created_at": utc_now()}
-            if api_content is not None:
+            if self.pending_attachments:
+                item["api_content"] = attachment_prompt(
+                    api_content or prompt, self.pending_attachments
+                )
+                item["attachments"] = [entry.path for entry in self.pending_attachments]
+            elif api_content is not None:
                 item["api_content"] = api_content
             if metadata:
                 item.update(metadata)
@@ -196,6 +215,8 @@ class ChatApp:
             self.ui.error(str(exc))
             return False
 
+        if prompt is not None:
+            self.pending_attachments = []
         self.last_result = result
         self.transcript.append(
             {
@@ -261,6 +282,15 @@ class ChatApp:
                 self.ui.help()
             elif command == "/web":
                 self._cmd_web(args)
+            elif command == "/attach":
+                self._cmd_attach(args)
+            elif command == "/detach":
+                if args:
+                    raise MlxChatError("Usage: /detach")
+                self.pending_attachments = []
+                self.ui.success("Pending attachments cleared.")
+            elif command == "/profile":
+                self._cmd_profile(args)
             elif command == "/think":
                 self._cmd_think(args)
             elif command == "/concise":
@@ -273,6 +303,7 @@ class ChatApp:
                 self._cmd_new(args)
             elif command == "/reset":
                 self.transcript.clear()
+                self.pending_attachments = []
                 self.last_result = None
                 self._autosave()
                 self.ui.success("Conversation context cleared.")
@@ -329,6 +360,48 @@ class ChatApp:
                 self.ui.error(f"Unknown command {command!r}.{hint}")
         except (MlxChatError, OSError, ValueError) as exc:
             self.ui.error(str(exc))
+
+    def _show_attachments(self) -> None:
+        if not self.pending_attachments:
+            self.ui.info("No pending attachments. Use /attach PATH.")
+            return
+        files = "\n".join(
+            f"{item.path} ({item.size} bytes{' · truncated' if item.truncated else ''})"
+            for item in self.pending_attachments
+        )
+        self.ui.info(f"Selected file excerpts for the next prompt:\n{files}")
+
+    def _check_attachment_budget(self, files, settings) -> None:
+        select_context(
+            [*system_messages(settings), {"role": "user", "content": attachment_prompt("", files)}],
+            settings,
+        )
+
+    def _cmd_attach(self, args: list[str]) -> None:
+        if args:
+            files = merge_attachments(self.pending_attachments, read_attachments(args))
+            self._check_attachment_budget(files, self.settings)
+            self.pending_attachments = files
+        self._show_attachments()
+
+    def _cmd_profile(self, args: list[str]) -> None:
+        if not args:
+            self.ui.info("Available profiles: " + ", ".join(list_profiles()))
+        elif len(args) == 2 and args[0] == "save":
+            path = save_profile(args[1], self.settings)
+            self.ui.success(f"Saved profile {path.stem!r} to {path}.")
+        elif len(args) == 2 and args[0] == "delete":
+            delete_profile(args[1])
+            self.ui.success(f"Deleted profile {args[1]!r}.")
+        elif len(args) == 1:
+            candidate = apply_profile(args[0], self.settings)
+            self._check_attachment_budget(self.pending_attachments, candidate)
+            for key in PROFILE_FIELDS:
+                setattr(self.settings, key, getattr(candidate, key))
+            self._autosave()
+            self.ui.success(f"Applied profile {args[0]!r}.")
+        else:
+            raise MlxChatError("Usage: /profile [NAME|save NAME|delete NAME]")
 
     def _cmd_think(self, args: list[str]) -> None:
         if not args:
@@ -437,6 +510,8 @@ class ChatApp:
         if len(args) > 1:
             raise MlxChatError("Usage: /new [NAME]")
         new_name = normalize_session_name(args[0]) if args else None
+        if new_name and new_name in {name for name, _path in list_sessions()}:
+            raise MlxChatError(f"Session {new_name!r} already exists. Use /load or another name.")
         self._autosave()
         old_transcript = self.transcript
         old_result = self.last_result
@@ -452,6 +527,7 @@ class ChatApp:
             self.last_result = old_result
             self.session_name = old_name
             raise
+        self.pending_attachments = []
         label = "session " + repr(self.session_name) if self.session_name else "a new conversation"
         self.ui.success(f"Started {label}.")
 
@@ -476,7 +552,7 @@ class ChatApp:
         self.settings.system_prompt = value
         self._autosave()
         self.ui.success(
-            "System prompt updated." if value else "Default MacBook system prompt restored."
+            "System prompt updated." if value else "Default Mac system prompt restored."
         )
 
     def _cmd_retry(self) -> None:
@@ -668,8 +744,7 @@ class ChatApp:
             if new_manager is not None:
                 self._stop_new_result(new_manager, new_result)
 
-            # Restore the previously working model so a typo or download error
-            # does not strand the live conversation without a server.
+            # Roll back a failed model switch before accepting another prompt.
             self.settings.model = old_model
             self.settings.server_args = old_server_args
             self.manager = ServerManager(self.settings)
@@ -710,21 +785,13 @@ class ChatApp:
             "name": self.session_name,
             "model": self.settings.model,
             "system_prompt": self.settings.system_prompt,
-            "settings": {
-                "think": self.settings.think,
-                "concise": self.settings.concise,
-                "temperature": self.settings.temperature,
-                "top_p": self.settings.top_p,
-                "top_k": self.settings.top_k,
-                "min_p": self.settings.min_p,
-                "max_tokens": self.settings.max_tokens,
-                "context_tokens": self.settings.context_tokens,
-            },
+            "settings": {key: getattr(self.settings, key) for key in SESSION_SETTINGS},
             "messages": self.transcript,
             "updated_at": utc_now(),
         }
 
     def _save(self, name: str) -> Path:
+        name = normalize_session_name(name)
         previous = self.session_name
         self.session_name = name
         payload = self._session_payload()
@@ -751,8 +818,9 @@ class ChatApp:
         payload = load_session(name)
         restored = restore_session(payload, self.settings)
 
-        # Commit only after every saved message and setting has passed validation.
+        # Validate before replacing the current session.
         self.transcript = restored.messages
+        self.pending_attachments = []
         for key in ("system_prompt", *SESSION_SETTINGS):
             setattr(self.settings, key, getattr(restored.settings, key))
         self.session_name = name
@@ -866,7 +934,8 @@ class ChatApp:
         record = self.manager.matching_record()
         if not record:
             raise MlxChatError(
-                "This is an external server, so mlx-chat will not stop it without ownership proof."
+                "This server is not tracked by mlx-chat. "
+                "Stop it through the process that started it."
             )
         self._autosave()
         with self.ui.console.status(Text("Stopping MLX-LM and releasing memory…", style="cyan")):

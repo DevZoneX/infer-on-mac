@@ -3,9 +3,6 @@
 __version__ = "0.1.0"
 DEFAULT_MODEL = "mlx-community/Qwen3-4B-4bit"
 
-# 48 GB M4 Max presets: a fast dense model, a performant MoE model, and a
-# high-quality large dense model. The large preset needs a mostly idle Mac and
-# a restrained context window because its weights alone are roughly 40 GB.
 MODEL_PRESETS = {
     "tiny": DEFAULT_MODEL,
     "small": "mlx-community/Qwen3-8B-4bit",

@@ -1,4 +1,4 @@
-"""Cancellable, bounded streaming HTTP transport for the local inference server."""
+"""HTTP streaming and cancellation."""
 
 from __future__ import annotations
 

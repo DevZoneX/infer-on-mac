@@ -330,3 +330,37 @@ def test_resolve_server_command_honors_an_explicit_executable(tmp_path, monkeypa
     monkeypatch.setenv("MLX_LM_SERVER_BIN", str(executable))
 
     assert server.resolve_server_command() == [str(executable)]
+
+
+@pytest.mark.parametrize("bare_name", [False, True])
+def test_record_matching_accepts_resolved_interpreter_path(tmp_path, monkeypatch, bare_name):
+    executable = tmp_path / "python3.11"
+    executable.write_text("interpreter")
+    alias = tmp_path / "python"
+    alias.symlink_to(executable)
+    item = record(120, command=[str(alias)])
+    monkeypatch.setattr(server.os, "getpgid", lambda pid: 120)
+    monkeypatch.setattr(server, "process_start_identity", lambda pid: "start-120")
+    monkeypatch.setattr(
+        server,
+        "process_command",
+        lambda pid: (
+            f"{executable.name if bare_name else executable} "
+            "--model model-120 --host 127.0.0.1 --port 8080"
+        ),
+    )
+    assert server.record_matches_process(item)
+
+
+def test_process_command_requests_untruncated_arguments(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(server, "process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda command, **kw: (calls.append(command), SimpleNamespace(stdout="full command\n"))[1],
+    )
+    assert server.process_command(120) == "full command"
+    assert "-ww" in calls[0]

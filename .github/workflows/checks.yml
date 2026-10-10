@@ -12,11 +12,14 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         voice: [false, true]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           python-version: '3.11'
       - name: Install text-only dependencies
@@ -25,7 +28,11 @@ jobs:
       - name: Install with audio dependencies
         if: ${{ matrix.voice }}
         run: uv sync --locked --extra dev --extra voice --extra web
-      - run: uv run --no-sync ruff check src tests
-      - run: uv run --no-sync ruff format --check src tests
-      - run: uv build
-      - run: uv run --no-sync pytest
+      - name: Lint
+        run: uv run --no-sync ruff check src tests
+      - name: Check formatting
+        run: uv run --no-sync ruff format --check src tests
+      - name: Build packages
+        run: uv build
+      - name: Test
+        run: uv run --no-sync pytest

@@ -181,16 +181,22 @@ def test_cli_inference_error_exit_code_and_stderr(local_api, tmp_path):
     assert "Traceback" not in outcome.stderr
 
 
-@pytest.fixture
-def harmless_child(tmp_path, monkeypatch):
+@pytest.fixture(params=["direct", "symlink"])
+def harmless_child(tmp_path, monkeypatch, request):
     monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path / "home"))
     script = (
         "import signal,sys,time; "
         "signal.signal(signal.SIGINT, lambda *_: sys.exit(0)); "
         "print('ready', flush=True); time.sleep(30)"
     )
+    executable = Path(sys.executable).resolve()
+    if request.param == "symlink":
+        alias = tmp_path / "runner-environment" / "python-alias"
+        alias.parent.mkdir()
+        alias.symlink_to(executable)
+        executable = alias
     command = [
-        sys.executable,
+        str(executable),
         "-c",
         script,
         "--model",
@@ -231,7 +237,7 @@ def harmless_child(tmp_path, monkeypatch):
 
 def test_real_owned_child_is_registered_and_stopped(harmless_child):
     process, record = harmless_child
-    assert server.record_matches_process(record)
+    assert server.record_matches_process(record), server.process_command(record.pid)
     server._replace_record(record)
     assert server.list_records() == [record]
     stopped = server.stop_record(record, grace=1)
@@ -339,3 +345,26 @@ def test_already_cancelled_request_never_contacts_server(local_api):
     result = client(local_api).collect([], think=False, cancel_event=cancelled)
     assert result.finish_reason == "cancelled"
     assert local_api.requests == []
+
+
+def test_cli_file_context_and_profile_reach_local_server(local_api, tmp_path):
+    path = tmp_path / "code with spaces.py"
+    path.write_text("print('file snapshot')", encoding="utf-8")
+    outcome = run_cli(
+        local_api,
+        tmp_path,
+        "--json",
+        "--file",
+        str(path),
+        "--profile",
+        "coding",
+        "--temperature",
+        "0.3",
+    )
+    assert outcome.returncode == 0, outcome.stderr
+    assert json.loads(outcome.stdout)["answer"] == "Hello"
+    payload = local_api.requests[-1]
+    assert payload["temperature"] == 0.3
+    assert "practical coding help" in payload["messages"][0]["content"]
+    assert "print('file snapshot')" in payload["messages"][-1]["content"]
+    assert "untrusted reference data" in payload["messages"][-1]["content"]

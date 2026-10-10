@@ -1,73 +1,59 @@
-# Source code guide
+# Source layout
 
-This directory contains the `mlx_chat` Python package behind the `mlx-chat`
-command-line program.
-
-## How a chat request flows
+`mlx_chat` is the package used by the `mlx-chat` entry point and
+`python -m mlx_chat`.
 
 ```text
-cli.py → server.py → client.py → chat.py → ui.py
-                 │                 │
-                 └── starts MLX ───┴── streams the model response
+CLI settings → server start/attach → chat controller → API stream → terminal view
 ```
 
-- `mlx_chat/cli.py` parses commands, loads settings, and starts/reuses the MLX
-  server.
-  Chat modules load only when starting chat; utility commands do not import the
-  interactive UI or optional backends.
-- `mlx_chat/server.py` safely launches, records, checks, and stops managed
-  `mlx_lm.server` processes.
-- `mlx_chat/client.py` calls the OpenAI-compatible local API and turns its
-  streaming events into a final result. `transport.py` reads streams through a
-  bounded queue and interrupts stalled connections when cancelled.
-- `mlx_chat/chat.py` owns the conversation, slash commands, sessions, model
-  switching, concise mode, and voice entry.
-- `mlx_chat/ui.py` builds the terminal interface and keyboard shortcuts.
-  `rendering.py` presents live Markdown, response panels, and generation metrics.
-  `conversation.py` owns scrolling, simple operation modes, and static command
-  previews. Plain chat renders completed responses without a second live engine.
+| Module | Responsibility |
+| --- | --- |
+| `cli.py` | Argument parsing, configuration commands, one-off output, and startup coordination. |
+| `server.py` | Endpoint/registry locks, process identity, spawn/reuse, recovery, and shutdown. |
+| `client.py` | Request payloads, SSE parsing, reasoning separation, and generation results. |
+| `transport.py` | Bounded HTTP worker queue and cancellable reads. |
+| `chat.py` | Conversation state, slash commands, attachments, profiles, sessions, and model switches. |
+| `ui.py` | Prompt setup, key bindings, messages, help, and transcript restoration. |
+| `conversation.py` | Full-screen view, scrolling, popups, selection, cached lines, and UI/worker coordination. |
+| `rendering.py` | Stream previews, reasoning traces, answer panels, and metrics. |
+| `startup.py`, `theme.py` | Startup progress and colors. |
+| `config.py` | Validated settings, app paths, atomic JSON writes, and session filenames. |
+| `context.py` | System prompts and bounded selection of complete recent turns. |
+| `sessions.py` | Saved-state validation and result reconstruction. |
+| `attachments.py` | Bounded UTF-8 snapshots and project traversal. |
+| `profiles.py` | Built-in and saved generation presets. |
+| `terminal.py`, `commands.py` | Text sanitization, clipboard helpers, and command names. |
+| `voice.py`, `tts.py`, `keyboard.py` | Whisper recording/transcription, Kokoro synthesis, faded output-stream shutdown, and audio stop keys. |
+| `web.py` | Explicit searches and bounded snippet context; provider import is lazy. |
+| `resources.py` | CPU/resident-memory samples for the active tracked process. |
+| `errors.py` | Application, endpoint, and API errors. |
+| `__init__.py`, `__main__.py` | Version/model shortcuts and module entry point. |
 
-## Supporting modules
+Utility CLI commands do not import the interactive UI or audio/search backends.
+Profiles and attachments use the standard library; they start no service and
+load no additional inference model.
 
-- `config.py` defines validated settings and manages config, history, sessions,
-  and exports below the application data directory.
-- `context.py` selects recent complete turns within a conservative request budget
-  without changing the transcript.
-- `sessions.py` validates saved state and reconstructs the latest generation.
-  The UI renders saved turns directly with historical metrics.
-- `terminal.py` groups text sanitization and bounded macOS clipboard helpers.
-  `commands.py` shares command names across components; `startup.py` provides
-  the startup card without importing the interactive UI.
-- `web.py` performs explicit `/web` searches and constructs bounded, untrusted
-  source context for the local model. Its optional provider loads only on use.
-- `voice.py` records microphone input and loads MLX Whisper on first use, or
-  preloads it when explicitly configured.
-- `tts.py` removes markup/emoji, lazily loads one English Kokoro voice, and lets
-  Kokoro handle speech playback. Ctrl-C stops speech. No language routing or
-  custom audio processing is involved.
-- `resources.py` reads CPU and RAM use for the active managed MLX server so the
-  UI can append them to each completed response.
-- `errors.py` contains user-facing error types.
-- `__init__.py` defines the default model and the `small`, `medium`, and
-  `large` preset mappings.
-- `__main__.py` supports `python -m mlx_chat`.
+## Constraints
 
-## Conventions
+A settings object is shared by the client and UI. Validate a candidate before
+changing its fields. Loading a session validates messages, settings, and metrics
+before replacing current state.
 
-- Keep UI presentation in `ui.py`; conversation behavior belongs in `chat.py`.
-- Preserve the separation between model reasoning and final assistant content.
-- Treat server lifecycle changes as safety-sensitive: never signal a process
-  without the ownership checks in `server.py`.
-- Add or update a focused test in `../tests/` whenever behavior changes.
+A server record is not sufficient by itself to send a signal. Match its process
+group, start stamp, executable, and managed options. Startup failure cleanup uses
+the exact `Popen` child; registry cleanup compares instance tokens. Endpoint locks
+span health checks and generation warm-up.
 
-From the project root, run the checks with:
+HTTP reads run in a worker so the UI can cancel before a token arrives. The queue
+is bounded; shutdown wakes connected socket reads. Native Whisper work stays on
+the caller thread while the UI runs separately. Do not move it into the generic
+HTTP/task worker without checking MLX thread behavior.
 
-```bash
-uv run ruff check src tests
-uv run ruff format --check src tests
-uv run pytest
-```
+The transcript keeps full history, including private API context for attachments
+and searches. Request budgeting selects recent complete turns without deleting
+saved history. Display/export paths must not accidentally expose private API
+context when they are meant to show ordinary conversation text.
 
-Install developer tools with `uv sync --locked --extra dev`. Add `--extra voice`
-and `--extra web` to exercise optional features.
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for the complete workflow.
+Run the checks in [CONTRIBUTING.md](../CONTRIBUTING.md). The
+[test guide](../tests/README.md) maps behavior to test modules.

@@ -1,4 +1,4 @@
-"""Response panels and bounded live presentation, independent of prompt setup."""
+"""Response rendering."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class GenerationPresentation:
             self.final_generation(result, think=think)
             return result
 
-        # Plain/redirected chat renders once, without a second live UI engine.
+        # Plain output is printed after generation completes.
         result = generate(lambda _event, _result: None)
         self.final_generation(result, think=think)
         return result
@@ -131,7 +131,7 @@ class GenerationPresentation:
             if server.cpu_percent is not None:
                 metrics.append(f"CPU {server.cpu_percent:.1f}%")
             if server.memory_mib is not None:
-                metrics.append(f"RAM {server.memory_mib:,.0f} MiB")
+                metrics.append(f"RSS {server.memory_mib:,.0f} MiB")
         self.generation_info(" · ".join(metrics))
 
     def generation_info(self, value: str) -> None:

@@ -1,8 +1,11 @@
-"""Command names shared by completion, previews, and dispatch."""
+"""Slash commands."""
 
 SLASH_COMMANDS = [
     "/help",
     "/web",
+    "/attach",
+    "/detach",
+    "/profile",
     "/think",
     "/concise",
     "/voice",

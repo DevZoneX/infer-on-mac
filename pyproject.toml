@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mlx-chat-terminal"
 version = "0.1.0"
-description = "A polished local MLX-LM server and terminal chat experience for macOS"
+description = "Local MLX-LM server and terminal chat for Apple Silicon Macs"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -29,6 +29,11 @@ dev = [
   "pytest>=8.4,<9",
   "ruff>=0.13,<0.14",
 ]
+
+[project.urls]
+Homepage = "https://github.com/DevZoneX/infer-on-mac"
+Documentation = "https://github.com/DevZoneX/infer-on-mac/blob/main/docs/REFERENCE.md"
+Issues = "https://github.com/DevZoneX/infer-on-mac/issues"
 
 [project.scripts]
 mlx-chat = "mlx_chat.cli:main"

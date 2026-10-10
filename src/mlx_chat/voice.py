@@ -1,4 +1,4 @@
-"""Offline microphone capture and MLX Whisper transcription."""
+"""Microphone recording and Whisper transcription."""
 
 from __future__ import annotations
 
@@ -33,12 +33,9 @@ def preload_transcription_model(model: str = DEFAULT_TRANSCRIPTION_MODEL) -> Non
         from mlx_whisper.transcribe import ModelHolder
     except ImportError as exc:
         raise MlxChatError("Voice support is not installed. Run `uv sync --extra voice`.") from exc
-    # Keep Hugging Face's raw progress bar out of the Rich terminal UI; the
-    # caller presents a single loading status instead.
+    # The caller provides the download/loading indicator.
     disable_progress_bars()
-    # MLX Whisper transcribes with fp16 by default. Preload at that same dtype
-    # so ModelHolder can be reused instead of leaving an incompatible fp32
-    # model in its cache.
+    # Match Whisper's fp16 cache to avoid loading a second copy.
     ModelHolder.get_model(model, mx.float16)
     _model_ready = True
 
@@ -49,11 +46,7 @@ def recording_stop_requested(keyboard) -> bool:
 
 
 def record_microphone(*, seconds: int = 30, stop_event=None):
-    """Record a bounded prompt locally, stopping early after sustained silence.
-
-    Imports are intentionally delayed: regular text chat needs neither audio
-    dependencies nor microphone permission.
-    """
+    """Record until stopped, the time limit, or silence after speech."""
     if not 1 <= seconds <= 180:
         raise MlxChatError("Voice recording duration must be between 1 and 180 seconds.")
     if shutil.which("ffmpeg") is None:
@@ -66,7 +59,7 @@ def record_microphone(*, seconds: int = 30, stop_event=None):
         import sounddevice as sd
     except ImportError as exc:
         raise MlxChatError(
-            "Voice support is not installed. Run `uv sync --extra voice` (or rerun ./setup.sh)."
+            "Voice support is not installed. Run `uv sync --extra voice` or `./setup.sh --voice`."
         ) from exc
 
     sample_rate = 16_000
@@ -85,8 +78,7 @@ def record_microphone(*, seconds: int = 30, stop_event=None):
                     samplerate=sample_rate, channels=1, dtype="float32", blocksize=block_size
                 )
             )
-            # Permission/device setup can take time; start the recording budget
-            # only after the stream has actually opened.
+            # Microphone permission/setup time is outside the recording limit.
             started = time.monotonic()
             while time.monotonic() - started < seconds:
                 if (stop_event is not None and stop_event.is_set()) or recording_stop_requested(
@@ -101,16 +93,15 @@ def record_microphone(*, seconds: int = 30, stop_event=None):
                     silent_blocks = 0
                 else:
                     silent_blocks += 1
-                # Finish after 1.2 seconds of silence following actual speech.
-                # Initial silence never ends capture; F3 remains a manual stop.
+                # Ignore initial silence; stop after 1.2 seconds following speech.
                 if heard_speech and silent_blocks >= 12:
                     break
     except KeyboardInterrupt:
-        # Ctrl-C deliberately ends capture and retains the recorded prompt.
+        # Keep audio already captured when Ctrl-C ends recording.
         pass
     except Exception as exc:
         raise MlxChatError(
-            "Could not record from the microphone. Grant microphone access to your terminal/Codex "
+            "Could not record from the microphone. Grant microphone access to your terminal "
             f"and check the selected input device. Audio device error: {exc}"
         ) from exc
     if not chunks:
@@ -127,8 +118,7 @@ def transcribe_audio(audio, *, model: str = DEFAULT_TRANSCRIPTION_MODEL) -> str:
         from huggingface_hub.utils import disable_progress_bars
     except ImportError as exc:
         raise MlxChatError("Voice support is not installed. Run `uv sync --extra voice`.") from exc
-    # Lazy loading must keep download progress out of the live transcription UI,
-    # just as startup preloading does.
+    # Use the caller's status indicator during first-use loading.
     disable_progress_bars()
     sample_rate = 16_000
     with tempfile.NamedTemporaryFile(
@@ -145,7 +135,7 @@ def transcribe_audio(audio, *, model: str = DEFAULT_TRANSCRIPTION_MODEL) -> str:
         path.unlink(missing_ok=True)
     text = str(output.get("text", "")).strip() if isinstance(output, dict) else ""
     if not text:
-        raise MlxChatError("I could not detect speech. Try speaking closer to the microphone.")
+        raise MlxChatError("No speech detected. Speak closer to the microphone and try again.")
     return text
 
 

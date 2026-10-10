@@ -14,6 +14,7 @@ from mlx_chat.web import WebSearchResult, WebSource
 def bare_app() -> chat.ChatApp:
     app = object.__new__(chat.ChatApp)
     app.settings = Settings()
+    app.pending_attachments = []
     app.transcript = [{"role": "user", "content": "keep me"}]
     app.session_name = "current"
     app.last_result = GenerationResult(answer="old")
@@ -167,7 +168,7 @@ def test_system_command_shows_effective_default():
     app.ui = SimpleNamespace(console=Console(file=output, width=100))
     app._cmd_system([])
     assert "System prompt (default)" in output.getvalue()
-    assert "Apple Silicon MacBook" in output.getvalue()
+    assert "Apple Silicon Mac" in output.getvalue()
 
 
 def test_voice_transcription_is_rendered_as_user_input(monkeypatch):
@@ -407,3 +408,178 @@ def test_speak_and_stats_work_immediately_after_loading(monkeypatch):
     assert spoken == ["Restored answer"]
     assert "2.000 s" in output.getvalue()
     assert "3.00 token/s" in output.getvalue()
+
+
+def test_attached_context_is_sent_once_and_reused_on_retry(tmp_path):
+    app = bare_app()
+    path = tmp_path / "code.py"
+    path.write_text("print('snapshot')")
+    notices = []
+    app.ui.info = notices.append
+    app._cmd_attach([str(path)])
+    assert "Selected file excerpts" in notices[-1]
+    requests = []
+    app.client = SimpleNamespace(
+        collect=lambda messages, **kw: (
+            requests.append(messages),
+            GenerationResult(answer="explanation"),
+        )[1]
+    )
+    app.ui.render_generation = lambda generate, **kw: generate(lambda *args: None)
+    assert app._generate("Explain my code")
+    assert "print('snapshot')" in requests[-1][-1]["content"]
+    assert app.transcript[-2]["content"] == "Explain my code"
+    assert app.pending_attachments == []
+    path.write_text("changed since first prompt")
+    app._cmd_retry()
+    assert "print('snapshot')" in requests[-1][-1]["content"]
+    assert "changed since" not in requests[-1][-1]["content"]
+    assert app._generate("Another question")
+    assert requests[-1][-1]["content"] == "Another question"
+
+
+def test_failed_generation_keeps_pending_attachments_for_next_attempt(tmp_path):
+    app = bare_app()
+    path = tmp_path / "note.txt"
+    path.write_text("context")
+    app.ui.info = lambda message: None
+    app._cmd_attach([str(path)])
+    queued = app.pending_attachments
+    app.ui.error = lambda message: None
+    app.ui.render_generation = lambda *args, **kw: (_ for _ in ()).throw(MlxChatError("offline"))
+    assert not app._generate("Question")
+    assert app.pending_attachments is queued
+    assert app.transcript == [{"role": "user", "content": "keep me"}]
+
+
+def test_failed_attachment_budget_check_preserves_queue(tmp_path):
+    app = bare_app()
+    app.settings = Settings(system_prompt="small", context_tokens=600, max_tokens=100)
+    path = tmp_path / "note.txt"
+    path.write_text("x" * 300)
+    with pytest.raises(MlxChatError, match="context budget"):
+        app._cmd_attach([str(path)])
+    assert app.pending_attachments == []
+
+
+def test_profile_command_applies_and_saves_generation_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path / "home"))
+    app = bare_app()
+    app.ui.info = lambda message: None
+    app._cmd_profile(["coding"])
+    assert app.settings.temperature == 0.2
+    app.settings.temperature = 0.35
+    app._cmd_profile(["save", "mine"])
+    app._cmd_profile(["writing"])
+    assert app.settings.temperature == 0.7
+    app._cmd_profile(["mine"])
+    assert app.settings.temperature == 0.35
+    assert "practical coding help" in app.settings.system_prompt
+    assert app._session_payload()["settings"]["repetition_penalty"] == 1.0
+
+
+def test_profile_with_too_small_context_preserves_settings_and_attachments(tmp_path, monkeypatch):
+    from mlx_chat.attachments import Attachment
+    from mlx_chat.profiles import save_profile
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path / "home"))
+    app = bare_app()
+    app.pending_attachments = [Attachment("file", "x" * 1000)]
+    save_profile("small", Settings(system_prompt="small", context_tokens=600, max_tokens=100))
+    with pytest.raises(MlxChatError, match="context budget"):
+        app._cmd_profile(["small"])
+    assert app.settings.context_tokens == 32768
+    assert len(app.pending_attachments) == 1
+
+
+def test_new_and_reset_clear_pending_file_context():
+    from mlx_chat.attachments import Attachment
+
+    app = bare_app()
+    app.pending_attachments = [Attachment("file", "context")]
+    app._cmd_new([])
+    assert app.pending_attachments == []
+    app.pending_attachments = [Attachment("file", "context")]
+    app._dispatch_command("/reset")
+    assert app.pending_attachments == []
+
+
+def test_new_rejects_existing_session_without_overwriting(tmp_path, monkeypatch):
+    from mlx_chat.config import load_session, save_session
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path / "home"))
+    saved = {"messages": [{"role": "user", "content": "keep saved text"}]}
+    save_session("existing", saved)
+    app = bare_app()
+    original = app.transcript
+    with pytest.raises(MlxChatError, match="already exists"):
+        app._cmd_new(["existing"])
+    assert app.transcript is original
+    assert app.session_name == "current"
+    assert load_session("existing") == saved
+
+
+def test_startup_cli_generation_overrides_win_over_saved_session(tmp_path, monkeypatch):
+    from mlx_chat.attachments import Attachment
+    from mlx_chat.config import save_session
+    from mlx_chat.server import StartResult
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path / "home"))
+    save_session(
+        "saved",
+        {
+            "messages": [],
+            "system_prompt": "Saved instructions",
+            "settings": {"temperature": 0.9, "concise": False},
+        },
+    )
+    monkeypatch.setattr(chat, "TerminalUI", lambda *args, **kw: SimpleNamespace())
+    settings = Settings()
+    start = StartResult(settings.model, settings.host, settings.port, None, None, True, False)
+    app = chat.ChatApp(
+        settings,
+        start,
+        session_name="saved",
+        generation_overrides={"temperature": 0.2, "concise": True},
+    )
+    assert app.settings.temperature == 0.2
+    assert app.settings.concise is True
+    assert app.settings.system_prompt == "Saved instructions"
+    assert app.pending_attachments == []
+    loaded = chat.ChatApp(
+        Settings(), start, session_name="saved", attachments=[Attachment("file", "context")]
+    )
+    assert len(loaded.pending_attachments) == 1
+
+
+def test_load_clears_pending_files_but_keeps_saved_snapshots(tmp_path, monkeypatch):
+    from mlx_chat.attachments import Attachment
+    from mlx_chat.config import save_session
+
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path / "home"))
+    save_session(
+        "saved",
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "question",
+                    "api_content": "snapshot",
+                    "attachments": ["file.py"],
+                }
+            ]
+        },
+    )
+    app = bare_app()
+    app.pending_attachments = [Attachment("new-file", "new content")]
+    app._load("saved", announce=False)
+    assert app.pending_attachments == []
+    assert app.transcript[0]["api_content"] == "snapshot"
+
+
+def test_save_uses_a_canonical_session_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("MLX_CHAT_HOME", str(tmp_path / "home"))
+    app = bare_app()
+    path = app._save("  notes  ")
+    assert app.session_name == "notes"
+    assert path.name == "notes.json"

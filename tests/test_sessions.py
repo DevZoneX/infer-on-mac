@@ -93,3 +93,12 @@ def test_transcript_rendering_displays_visible_content_and_historical_metrics():
     assert rendered[0] == ("user", "question")
     assert rendered[1][1].answer == "answer"
     assert rendered[1][2] == {"think": True, "historical": True}
+
+
+@pytest.mark.parametrize("attachments", ["file.py", [None], {}])
+def test_restoration_rejects_invalid_attachment_labels(attachments):
+    with pytest.raises(MlxChatError, match="not valid"):
+        restore_session(
+            {"messages": [{"role": "user", "content": "question", "attachments": attachments}]},
+            Settings(),
+        )

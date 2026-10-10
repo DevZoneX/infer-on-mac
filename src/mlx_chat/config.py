@@ -1,4 +1,4 @@
-"""Configuration, runtime paths, and saved chat sessions."""
+"""Settings and local storage."""
 
 from __future__ import annotations
 
@@ -172,11 +172,11 @@ def sessions_dir() -> Path:
     return app_home() / "sessions"
 
 
-def normalize_session_name(name: str) -> str:
+def normalize_session_name(name: str, *, label: str = "Session") -> str:
     clean = name.strip()
     if not SESSION_NAME_RE.fullmatch(clean):
         raise MlxChatError(
-            "Session names must start with a letter or number and contain only "
+            f"{label} names must start with a letter or number and contain only "
             "letters, numbers, dots, dashes, or underscores (64 characters max)."
         )
     return clean
