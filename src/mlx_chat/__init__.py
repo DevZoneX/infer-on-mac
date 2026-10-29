@@ -1,6 +1,6 @@
 """MLX Chat Terminal."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 DEFAULT_MODEL = "mlx-community/Qwen3-4B-4bit"
 
 MODEL_PRESETS = {

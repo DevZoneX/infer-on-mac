@@ -60,6 +60,7 @@ def result_from_message(message: dict[str, Any]) -> GenerationResult:
         first_token_seconds=_duration(
             metrics.get("first_token_seconds"), "first_token_seconds", optional=True
         ),
+        tool_calls=list(message.get("tool_calls") or []),
     )
 
 
@@ -68,6 +69,18 @@ def latest_result(messages: list[dict[str, Any]]) -> GenerationResult | None:
         if message["role"] == "assistant":
             return result_from_message(message)
     return None
+
+
+def _validate_tool_message(message: dict[str, Any]) -> None:
+    if (
+        any(not isinstance(message.get(key), str) for key in ("content", "tool_call_id", "name"))
+        or any(
+            key in message and not isinstance(message[key], str)
+            for key in ("summary", "arguments", "diff", "approval")
+        )
+        or ("ok" in message and not isinstance(message["ok"], bool))
+    ):
+        raise MlxChatError("Saved session is not valid.")
 
 
 @dataclass(frozen=True)
@@ -92,6 +105,13 @@ def restore_session(payload: dict[str, Any], settings: Settings) -> RestoredSess
     ):
         raise MlxChatError("Saved session is not valid.")
     for message in messages:
+        if isinstance(message, dict) and message.get("role") == "tool":
+            _validate_tool_message(message)
+            continue
+        if isinstance(message, dict) and message.get("role") == "summary":
+            if not isinstance(message.get("content"), str):
+                raise MlxChatError("Saved session is not valid.")
+            continue
         if (
             not isinstance(message, dict)
             or message.get("role") not in ("user", "assistant")
@@ -110,6 +130,16 @@ def restore_session(payload: dict[str, Any], settings: Settings) -> RestoredSess
         ):
             raise MlxChatError("Saved session is not valid.")
         if message["role"] == "assistant":
+            calls = message.get("tool_calls", [])
+            if not isinstance(calls, list) or not all(
+                isinstance(call, dict)
+                and isinstance(call.get("id"), str)
+                and isinstance(call.get("function"), dict)
+                and isinstance(call["function"].get("name"), str)
+                and isinstance(call["function"].get("arguments"), str)
+                for call in calls
+            ):
+                raise MlxChatError("Saved session is not valid.")
             result_from_message(message)
     overrides = {key: saved[key] for key in SESSION_SETTINGS if key in saved}
     # None must not silently bypass merged() validation for saved values.

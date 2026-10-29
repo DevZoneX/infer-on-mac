@@ -8,7 +8,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.clipboard import ClipboardData
 from prompt_toolkit.completion import FuzzyWordCompleter
 from prompt_toolkit.filters import Condition, to_filter
-from prompt_toolkit.history import FileHistory
+from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, VSplit, Window
@@ -17,7 +17,9 @@ from prompt_toolkit.styles import Style as PromptStyle
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
+from rich.padding import Padding
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.style import Style as RichStyle
 from rich.table import Table
@@ -27,13 +29,24 @@ from . import tts, voice
 from .commands import SLASH_COMMANDS as SLASH_COMMANDS
 from .config import Settings, history_path
 from .errors import MlxChatError
-from .rendering import AnswerPanel, GenerationPresentation, ThinkingTrace
+from .rendering import (
+    AnswerPanel,
+    GenerationPresentation,
+    ThinkingTrace,
+    approval_card,
+    plan_checklist,
+    plan_prompt_card,
+    tool_description,
+)
 from .sessions import result_from_message
 from .startup import StartupStatus
 from .terminal import copy_text, paste_text
 from .terminal import sanitize_terminal_text as sanitize_terminal_text
 from .terminal import short_model as short_model
-from .theme import ACCENT, BORDER, MUTED, SURFACE
+from .theme import ACCENT, BORDER, BRAND_START, DANGER, MUTED, SUCCESS, SURFACE, WARNING, gradient
+
+APPROVAL_PLACEHOLDER = "↵ allow once · a always · n decline · or type what to do instead"
+PLAN_PLACEHOLDER = "↵ run the plan · type changes to revise it · n keep it for later"
 
 
 class TerminalUI(GenerationPresentation):
@@ -46,6 +59,7 @@ class TerminalUI(GenerationPresentation):
         self._message_count = 0
         self._conversation = None
         self.server_stopped = False
+        self.agent_status: str | None = None
         self._banner_state = {"reused": False, "managed": True, "voice_ready": False}
 
         bindings = KeyBindings()
@@ -239,39 +253,50 @@ class TerminalUI(GenerationPresentation):
         self._session_name = session_name
         self._message_count = message_count
 
-    def info_panel(self) -> Panel:
+    def info_panel(self):
+        """A slim one-line header: wordmark, model and mode on the left, state on the right."""
         thinking = self.settings.think and not self.settings.concise
-        stt_ready = self._banner_state["voice_ready"] or voice.is_ready()
-        heading = Text(justify="center", no_wrap=True, overflow="ellipsis")
-        heading.append(short_model(self.settings.model), style=f"bold {ACCENT}")
-        heading.append(f"  ·  Thinking: {'on' if thinking else 'off'}", style=MUTED)
+        left = Text(no_wrap=True, overflow="ellipsis")
+        left.append("◆ ", style=BRAND_START)
+        for character, color in gradient("mlx-chat"):
+            left.append(character, style=f"bold {color}")
+        left.append("   ")
+        left.append(short_model(self.settings.model), style="bold #e5e7eb")
+        modes = []
+        agent = getattr(self, "agent_status", None)
+        modes.append(("agent " + agent, SUCCESS) if agent else ("chat", MUTED))
+        if thinking:
+            modes.append(("thinking", MUTED))
         if self.settings.concise:
-            heading.append("  ·  Concise", style=MUTED)
-        details = Table.grid(expand=True, padding=(0, 1))
-        for _ in range(3):
-            details.add_column(ratio=1, justify="center", no_wrap=True, overflow="ellipsis")
-        audio_cells = []
-        for label, model, ready in (
-            ("TTS", tts.DEFAULT_TTS_MODEL, tts.is_ready()),
-            ("STT", voice.DEFAULT_TRANSCRIPTION_MODEL, stt_ready),
-        ):
-            cell = Text(f"{label}: {short_model(model)} · ", style="dim")
-            cell.append("ready" if ready else "not loaded", style=ACCENT if ready else "dim")
-            audio_cells.append(cell)
-        session = Text(
-            f"Session: {self._session_name or 'unsaved'} · Turns: {self._message_count // 2}",
-            style="dim",
+            modes.append(("concise", MUTED))
+        stt_ready = self._banner_state["voice_ready"] or voice.is_ready()
+        if stt_ready or tts.is_ready():
+            modes.append(("voice ready", ACCENT))
+        for label, color in modes:
+            left.append("  ·  ", style=BORDER)
+            left.append(label, style=color)
+
+        right = Text(no_wrap=True, overflow="ellipsis", justify="right")
+        share = getattr(self, "context_share", None)
+        if share is not None:
+            share = max(0.0, min(1.0, share))
+            filled = round(share * 8)
+            color = SUCCESS if share < 0.6 else WARNING if share < 0.85 else DANGER
+            right.append("context ", style=MUTED)
+            right.append("▰" * filled, style=color)
+            right.append("▱" * (8 - filled), style=BORDER)
+            right.append(f" {share:.0%}", style=MUTED)
+            right.append("  ·  ", style=BORDER)
+        turns = self._message_count // 2
+        right.append(
+            f"{self._session_name or 'unsaved'} · {turns} turn{'' if turns == 1 else 's'}",
+            style=MUTED,
         )
-        details.add_row(*audio_cells, session)
-        content = Group(heading, details)
-        return Panel(
-            content,
-            title="[bold]mlx-chat[/bold] · local",
-            title_align="left",
-            border_style=BORDER,
-            box=box.ROUNDED,
-            padding=(0, 1),
-        )
+        bar = Table.grid(expand=True, padding=(0, 2))
+        bar.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+        bar.add_column(no_wrap=True, justify="right")
+        bar.add_row(left, right)
+        return Group(Padding(bar, (0, 2)), Rule(style=BORDER, characters="─"))
 
     def banner(self, *, reused: bool, managed: bool, voice_ready: bool = False) -> None:
         self._banner_state = {"reused": reused, "managed": managed, "voice_ready": voice_ready}
@@ -283,7 +308,7 @@ class TerminalUI(GenerationPresentation):
 
     @staticmethod
     def conversation_hint() -> str:
-        return "Try /help · F1 listen · F2 speak · F3 stop · ↵ send · esc+↵ newline"
+        return "↵ send  ·  esc ↵ newline  ·  / commands  ·  /plan plans first  ·  F1 F2 F3 voice"
 
     @staticmethod
     def message_content(content, *, user=False):
@@ -329,6 +354,10 @@ class TerminalUI(GenerationPresentation):
                 self.user_message(message["content"])
                 if message.get("attachments"):
                     self.info("Attached excerpts: " + ", ".join(message["attachments"]))
+            elif message["role"] == "tool":
+                self.tool_result(message)
+            elif message["role"] == "summary":
+                self.summary_notice(message)
             else:
                 result = result_from_message(message)
                 self.final_generation(result, think=bool(result.reasoning), historical=True)
@@ -347,15 +376,92 @@ class TerminalUI(GenerationPresentation):
         finally:
             self._conversation.audio_key = None
 
-    def run_task(self, operation):
+    def run_task(self, operation, *, label: str | None = None):
         if self._conversation is None:
             return operation()
-        return self._conversation.generate(lambda callback: operation(), lambda _: None)
+        panel = None
+        if label:
+            spinner = Spinner("dots", text=Text(label), style=MUTED)
+            panel = self.chat_panel(spinner)
+            panel.renderable = self.message_content(spinner)
+        return self._conversation.generate(lambda callback: operation(), lambda _: panel)
+
+    def summary_notice(self, item, *, automatic: bool = False) -> None:
+        trace = self.thinking_trace(item.get("content", ""))
+        trace.label = f"Summarized {item.get('covers', 0)} earlier messages" + (
+            " to free context" if automatic else ""
+        )
+        self.console.print(trace)
+
+    def plan_card(self, plan) -> None:
+        self.console.print(self.chat_panel(plan_checklist(plan)))
+
+    def ask_plan(self) -> tuple[str, str]:
+        """After a plan: ("run" | "revise" | "keep", feedback)."""
+        answer = self._ask(PLAN_PLACEHOLDER, plan_prompt_card(), "Run this plan? [Y/n/changes] ")
+        value = answer.strip()
+        lowered = value.lower()
+        if lowered in {"", "y", "yes", "go", "run", "ok"}:
+            return "run", ""
+        if lowered in {"n", "no", "keep", "later"} or value.startswith("/"):
+            return "keep", ""
+        return "revise", value
+
+    def _ask(self, placeholder: str, card, plain_question: str) -> str:
+        conversation = self._conversation
+        if conversation is None:
+            self.console.print(card)
+            if not self.console.is_terminal:
+                return "n"
+            return self.console.input(plain_question)
+        buffer = self.prompt_session.default_buffer
+        history = buffer.history
+        conversation.approval = placeholder
+        conversation.follow = True
+        conversation.update(card)
+        # Answers to questions are not chat input; keep them out of the prompt history.
+        buffer.history = InMemoryHistory()
+        try:
+            return self.prompt_session.prompt("", default="", bottom_toolbar=None)
+        finally:
+            buffer.history = history
+            conversation.approval = False
+            conversation.update(None)
 
     def run_native(self, operation):
         if self._conversation is None:
             return operation()
         return self._conversation.run_native(operation)
+
+    def run_tool(self, label: str, operation):
+        """Run a tool with a spinner; Esc or Ctrl-C sets the event passed to it."""
+        if self._conversation is None:
+            return operation(None)
+        spinner = Spinner("dots", text=Text(sanitize_terminal_text(label)), style=MUTED)
+        panel = self.chat_panel(spinner)
+        panel.renderable = self.message_content(spinner)
+        conversation = self._conversation
+        return conversation.generate(
+            lambda _callback: operation(conversation.cancelled), lambda _: panel
+        )
+
+    def ask_approval(self, name: str, arguments_text: str, preview=None) -> tuple[str, str]:
+        """Ask before a tool changes files or runs a command.
+
+        Returns ("once" | "always" | "deny", feedback). Ctrl-C raises KeyboardInterrupt.
+        """
+        description = tool_description({"name": name, "arguments": arguments_text})
+        card = approval_card(name, description, preview)
+        answer = self._ask(APPROVAL_PLACEHOLDER, card, "Allow? [Y/a/n] ")
+        value = answer.strip()
+        lowered = value.lower()
+        if lowered in {"", "y", "yes", "ok", "allow"}:
+            return "once", ""
+        if lowered in {"a", "always"}:
+            return "always", ""
+        if lowered in {"n", "no", "deny", "decline"} or value.startswith("/"):
+            return "deny", ""
+        return "deny", value
 
     def audio_status(self, value: str):
         if getattr(self, "_conversation", None) is not None:
@@ -469,6 +575,12 @@ class TerminalUI(GenerationPresentation):
                 "/profile [NAME|save NAME|delete NAME]",
                 "Apply, save, delete, or list generation profiles",
             ),
+            ("/agent [on|off]", "Let the model use tools in this folder, or plain chat"),
+            ("/plan [TASK]", "Plan first with read-only tools, then run or revise the plan"),
+            ("/approve [ask|edits|all]", "Ask before edits and commands, or auto-allow them"),
+            ("/memory [add TEXT|reload]", "Show or add to the project's AGENTS.md memory"),
+            ("/compact", "Summarize older messages to free context"),
+            ("/tools", "List agent tools and which need approval"),
             ("/web QUERY", "Search the web and generate an answer with source links"),
             ("/think [on|off|toggle]", "Control Qwen thinking on future turns"),
             ("/concise [on|off|toggle]", "Prefer fast, brief direct answers"),

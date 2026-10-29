@@ -8,7 +8,6 @@ import json
 import os
 import platform
 import shutil
-import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -28,6 +27,7 @@ from .client import ChatClient
 from .config import Settings, config_path, load_settings, save_settings
 from .context import select_context, system_messages
 from .errors import ApiError, MlxChatError, ServerUnavailableError
+from .hardware import PRESET_WEIGHTS_GIB, memory_gib, recommended_preset
 from .server import (
     ServerManager,
     StartResult,
@@ -115,6 +115,26 @@ def add_runtime_options(parser: argparse.ArgumentParser, *, positional_model: bo
     )
 
 
+def add_agent_options(parser: argparse.ArgumentParser, *, default_on: bool) -> None:
+    state = "on" if default_on else "off"
+    parser.add_argument(
+        "--agent",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=f"Let the model use workspace tools (default: {state})",
+    )
+    parser.add_argument(
+        "--workspace",
+        metavar="PATH",
+        help="Folder the agent may read, edit, and run commands in (default: current folder)",
+    )
+    parser.add_argument(
+        "--approve",
+        choices=("ask", "edits", "all"),
+        help="ask: confirm edits and commands · edits: auto-apply edits · all: never ask",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = HelpfulParser(
         prog="mlx-chat",
@@ -136,6 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Attach text file/project context to the next prompt; repeatable",
     )
+    add_agent_options(chat, default_on=True)
     chat.add_argument("--session", help="Load or create an auto-saved session")
     chat.add_argument("--ephemeral", action="store_true", help="Stop the server when chat exits")
     chat.add_argument("--attach", action="store_true", help="Require an already-running server")
@@ -159,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Attach text file/project context; repeatable",
     )
+    add_agent_options(run, default_on=False)
     run.add_argument("--json", action="store_true", help="Print structured JSON")
     run.add_argument(
         "--show-reasoning", action="store_true", help="Include reasoning in human output"
@@ -249,8 +271,11 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         connect_timeout=getattr(args, "connect_timeout", None),
         context_tokens=getattr(args, "context_tokens", None),
         preload_voice=getattr(args, "preload_voice", None),
+        approval=getattr(args, "approve", None),
         server_args=server_args,
     )
+    if getattr(args, "agent", None) is not None:
+        settings = settings.merged(agent=args.agent)
     if settings.host not in LOOPBACK_HOSTS and not getattr(args, "allow_network", False):
         raise MlxChatError(
             f"Refusing to bind to {settings.host!r} without --allow-network. MLX-LM's server "
@@ -384,6 +409,53 @@ def ensure_server(
         raise
 
 
+def workspace_path(args: argparse.Namespace) -> Path:
+    value = getattr(args, "workspace", None)
+    path = Path(value).expanduser() if value else Path.cwd()
+    if not path.is_dir():
+        raise MlxChatError(f"Workspace {path} is not a folder.")
+    return path.resolve()
+
+
+class PlainAgentHost:
+    """Run agent steps without the full-screen view; activity goes to stderr."""
+
+    def __init__(self, client: ChatClient, think: bool, console: Console):
+        self.client = client
+        self.think = think
+        self.console = console
+
+    def generate(self, messages, tools):
+        return self.client.collect(messages, think=self.think, tools=tools)
+
+    def approve(self, call, preview):
+        from .rendering import approval_card, tool_description
+
+        description = tool_description({"name": call.name, "arguments": call.raw_arguments})
+        self.console.print(approval_card(call.name, description, preview))
+        if not sys.stdin.isatty():
+            self.console.print(Text("Declined: no terminal to ask. Use --approve.", style="dim"))
+            return "deny", "Approval was not available in this non-interactive run."
+        answer = self.console.input("Allow? [Y/a/n] ").strip()
+        lowered = answer.lower()
+        if lowered in {"", "y", "yes"}:
+            return "once", ""
+        if lowered in {"a", "always"}:
+            return "always", ""
+        return "deny", "" if lowered in {"n", "no"} else answer
+
+    def execute(self, call, run):
+        return run(None)
+
+    def tool_finished(self, item):
+        from .rendering import ToolTrace
+
+        self.console.print(ToolTrace(item))
+
+    def notice(self, message):
+        self.console.print(Text(message, style="yellow"))
+
+
 def run_chat(args: argparse.Namespace) -> int:
     from .attachments import attachment_prompt, read_attachments
     from .chat import ChatApp
@@ -421,6 +493,7 @@ def run_chat(args: argparse.Namespace) -> int:
             plain=plain,
             attachments=attachments,
             generation_overrides=generation_overrides,
+            workspace=workspace_path(args),
         )
     except (Exception, KeyboardInterrupt):
         _stop_new_server(settings, result, grace=2)
@@ -453,7 +526,14 @@ def run_once(args: argparse.Namespace) -> int:
     )
     try:
         client = ChatClient(settings)
-        result = client.collect(messages, think=settings.think and not settings.concise)
+        think = settings.think and not settings.concise
+        agent_run = None
+        # One-off prompts stay plain chat unless --agent asks for tools.
+        if getattr(args, "agent", None):
+            agent_run = run_agent_once(settings, args, client, messages, think, console)
+            result = agent_run.result
+        else:
+            result = client.collect(messages, think=think)
         if args.json:
             print(
                 json.dumps(
@@ -466,6 +546,25 @@ def run_once(args: argparse.Namespace) -> int:
                         "elapsed": result.elapsed,
                         "first_token_seconds": result.first_token_seconds,
                         "tokens_per_second": result.tokens_per_second,
+                        **(
+                            {
+                                "agent": {
+                                    "steps": agent_run.steps,
+                                    "tool_calls": agent_run.tool_calls,
+                                    "cached_tokens": agent_run.cached_tokens,
+                                    "tools": [
+                                        {
+                                            key: item.get(key)
+                                            for key in ("name", "arguments", "summary", "ok")
+                                        }
+                                        for item in agent_run.items
+                                        if item["role"] == "tool"
+                                    ],
+                                }
+                            }
+                            if agent_run is not None
+                            else {}
+                        ),
                     },
                     ensure_ascii=False,
                 )
@@ -484,6 +583,35 @@ def run_once(args: argparse.Namespace) -> int:
     finally:
         if args.ephemeral:
             _stop_new_server(settings, result_info)
+
+
+def run_agent_once(settings, args, client, messages, think, console):
+    from .agent import AgentState, agent_system_message, load_project_memory, run_agent
+    from .tools import Workspace
+
+    workspace = Workspace(
+        workspace_path(args), output_chars=settings.tool_output_chars, web=settings
+    )
+    state = AgentState(
+        workspace,
+        approval=settings.approval,
+        max_steps=settings.agent_max_steps,
+        memory=load_project_memory(workspace.root),
+    )
+    systems = [message for message in messages if message["role"] == "system"]
+    transcript = [message for message in messages if message["role"] != "system"]
+    prefix = [*systems, agent_system_message(workspace, state.memory)]
+
+    def build_messages():
+        history = [
+            {key: value for key, value in item.items() if key in API_KEYS} for item in transcript
+        ]
+        return select_context([*prefix, *history], settings, bytes_per_token=3).messages
+
+    return run_agent(state, PlainAgentHost(client, think, console), transcript, build_messages)
+
+
+API_KEYS = {"role", "content", "tool_calls", "tool_call_id", "name"}
 
 
 def run_serve(args: argparse.Namespace) -> int:
@@ -696,24 +824,7 @@ def run_models(args: argparse.Namespace) -> int:
 
 
 def _memory_gib() -> float | None:
-    try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        if pages > 0 and page_size > 0:
-            return pages * page_size / 1024**3
-    except (OSError, ValueError):
-        pass
-    try:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=2,
-        )
-        return int(result.stdout.strip()) / 1024**3
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
+    return memory_gib()
 
 
 def doctor_values() -> list[dict[str, Any]]:
@@ -744,6 +855,12 @@ def doctor_values() -> list[dict[str, Any]]:
         "Unified memory",
         memory is not None and memory >= 8,
         f"{memory:.1f} GiB" if memory else "unknown",
+    )
+    preset = recommended_preset(memory)
+    add(
+        "Recommended model",
+        True,
+        f"{preset} · {MODEL_PRESETS[preset]} (~{PRESET_WEIGHTS_GIB[preset]:g} GiB weights)",
     )
     disk = shutil.disk_usage(Path.cwd())
     free_gib = disk.free / 1024**3

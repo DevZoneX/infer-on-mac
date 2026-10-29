@@ -189,6 +189,12 @@ path. `//example` sends the literal message `/example` to the model.
 | Command | Behavior |
 | --- | --- |
 | `/help` | Show commands. Typing previews usage; Enter runs the command. |
+| `/agent [on\|off]` | Turn workspace tools on or off; no argument toggles. |
+| `/approve [ask\|edits\|all]` | Show or set when tool calls need approval. `ask` resets "always" choices. |
+| `/tools` | List agent tools, the workspace, and which tools need approval. |
+| `/plan [TASK]` | Plan with read-only tools, then run (Return), revise (type changes), or keep (`n`). No argument shows the current plan. |
+| `/memory [add TEXT\|reload]` | Show the loaded project memory, append a note to `AGENTS.md`, or reread the files. |
+| `/compact` | Summarize all but the latest turn; only the summary is sent afterwards. |
 | `/attach [PATH ...]` | Select file/project excerpts; no arguments lists pending files. |
 | `/detach` | Clear pending attachments. |
 | `/profile [NAME]` | List profiles or apply one. |
@@ -246,6 +252,8 @@ Aliases: `/quit`, `/q` → `/exit`; `/shutdown` → `/stop`; `/temp` → `/tempe
 | Mouse wheel | Scroll. |
 | Drag conversation text | Select and copy it. |
 | Click a thinking label | Expand/collapse the reasoning trace. |
+| Click a tool line | Expand/collapse that tool's output or diff. |
+| Return / `a` / `n` at an approval card | Allow once / always allow that tool / decline. Other text declines and tells the model what to do instead. |
 
 Terminals do not report Fn separately for Escape. Hold Fn for F1–F3 if those
 keys control hardware. Popups close with Enter or Esc.
@@ -413,11 +421,46 @@ not a shell command.
 | `web_timeout` | `10` | Integer 1–60, seconds. |
 | `web_region` | `us-en` | Non-empty provider region string. |
 | `web_safesearch` | `moderate` | `on`, `moderate`, or `off`. |
+| `agent` | `true` | Boolean; interactive chat only. `run` needs `--agent`. |
+| `approval` | `ask` | `ask`, `edits`, or `all`. |
+| `agent_max_steps` | `30` | Integer 1–200 model calls per turn; then the model must answer. |
+| `tool_output_chars` | `12000` | Integer 1000–200000 characters kept from each tool result. |
+| `compact_at` | `75` | Integer 0–100: summarize older turns when the next request would use this percentage of the budget; 0 turns it off. |
 | `server_args` | `[]` | Strings excluding managed lifecycle options. |
 
 Chat settings affect the current conversation and named-session snapshots, not
 global `config.json`. Use `config set` for future launch defaults. Resetting
 configuration does not remove profiles, sessions, exports, or logs.
+
+## Agent tools
+
+`--workspace PATH` (default: the current folder) is the only folder tools may
+touch. Paths are resolved, including symlinks, and anything outside is refused.
+`list_files` and `search` skip `.git`, virtualenvs, `node_modules`, caches, and
+build folders; `search` uses ripgrep when installed. `read_file` returns up to 400
+numbered lines per call. Writes are atomic and keep file permissions.
+`run_command` uses `/bin/zsh -c` in the workspace with stdin closed, `TERM=dumb`,
+pagers disabled, a 120-second default timeout (600 maximum), and 256 KiB of
+captured output; cancelling or timing out stops its whole process group.
+
+`find_files` matches names (`*.swift`) or relative paths (`src/**/*.py`).
+`outline` parses Python exactly and uses patterns for JavaScript/TypeScript,
+Swift, Go, Rust, Ruby, C-family languages, shell, and Markdown headings.
+`fetch_url` downloads up to 2 MiB over http(s) and strips scripts, styles, and
+markup. Web content is untrusted, so both web tools ask for approval unless
+approval is `all`.
+
+Project memory files (`AGENTS.md`, `CLAUDE.md`, `.mlx-chat/instructions.md`, up to
+12,000 characters together) are read when agent mode starts and on `/memory
+reload`. They stay fixed between messages so the prompt cache keeps working.
+
+Planning sends the same tool list as normal work, so cached context carries over
+when the plan runs; edits and commands requested during planning are refused.
+
+Sessions save tool calls, results, diffs, and approval decisions with the turn.
+`/undo` and `/retry` remove a whole agent turn. Tool results are sent back to the
+model as untrusted data; review diffs before approving, since a prompt-injected
+file could ask the model to do something you did not intend.
 
 ## Context budget and metrics
 
@@ -438,11 +481,14 @@ changes the default Qwen sampling pair from `0.7/0.8` (temperature/top-p) to
 Reasoning and final content are stored separately when the API supplies separate
 channels or `<think>` tags.
 
+Agent turns count three bytes per token, which still overestimates code and
+prose for the Qwen and Llama tokenizers, so long tool output fits.
+
 Metrics include elapsed request time, first content/reasoning-token delay,
 completion tokens when supplied, and completion tokens divided by elapsed time.
 That average includes prompt processing/first-token wait, not decode time alone.
-CPU and resident memory (RSS) come from `ps` for the active tracked server when
-available. RSS is not total device memory usage. Historical responses retain
+CPU and "GB in use" (resident memory) come from `ps` for the active tracked server
+when available; this is not total device memory usage. Historical responses retain
 saved generation metrics without attaching current CPU/RSS readings.
 
 ## Server lifecycle

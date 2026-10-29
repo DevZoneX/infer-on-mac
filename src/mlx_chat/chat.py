@@ -15,6 +15,16 @@ from rich.table import Table
 from rich.text import Text
 
 from . import MODEL_PRESETS, resolve_model_preset
+from .agent import (
+    EXECUTE_REQUEST,
+    PLAN_REQUEST,
+    PROJECT_MEMORY_FILES,
+    REVISE_REQUEST,
+    AgentState,
+    agent_system_message,
+    load_project_memory,
+    run_agent,
+)
 from .attachments import Attachment, attachment_prompt, merge_attachments, read_attachments
 from .client import ChatClient, GenerationResult
 from .commands import SLASH_COMMANDS
@@ -26,7 +36,13 @@ from .config import (
     normalize_session_name,
     save_session,
 )
-from .context import DEFAULT_SYSTEM_PROMPT, select_context, system_messages
+from .context import (
+    DEFAULT_SYSTEM_PROMPT,
+    TEMPLATE_RESERVE,
+    select_context,
+    summary_message,
+    system_messages,
+)
 from .errors import MlxChatError
 from .profiles import PROFILE_FIELDS, apply_profile, delete_profile, list_profiles, save_profile
 from .server import (
@@ -38,6 +54,7 @@ from .server import (
 )
 from .sessions import SESSION_SETTINGS, latest_result, restore_session
 from .terminal import copy_text
+from .tools import APPROVAL_MODES, ToolCall, Workspace
 from .tts import speak
 from .ui import TerminalUI, sanitize_terminal_text, short_model
 from .voice import (
@@ -51,6 +68,13 @@ from .web import WebSearcher
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def display_path(path: Path) -> str:
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
 
 
 def default_export_path(session_name: str | None, extension: str) -> Path:
@@ -70,6 +94,7 @@ class ChatApp:
         plain: bool = False,
         attachments: list[Attachment] | None = None,
         generation_overrides: dict[str, Any] | None = None,
+        workspace: Path | None = None,
     ):
         self.settings = settings
         self.start_result = start_result
@@ -83,6 +108,10 @@ class ChatApp:
         self.last_result: GenerationResult | None = None
         self.should_exit = False
         self.voice_ready = False
+        self.workspace_root = Path(workspace) if workspace is not None else Path.cwd()
+        self.agent: AgentState | None = None
+        if settings.agent:
+            self._enable_agent(announce=False)
 
         if session_name:
             try:
@@ -110,27 +139,119 @@ class ChatApp:
         except (MlxChatError, OSError, ValueError) as exc:
             self.ui.warning(f"Voice is unavailable: {exc}")
 
-    def api_messages(self) -> list[dict[str, str]]:
+    def api_messages(self) -> list[dict[str, Any]]:
+        agent = getattr(self, "agent", None)
         messages = system_messages(self.settings)
-        for item in self.transcript:
+        if agent is not None and agent.tools_supported:
+            messages.append(agent_system_message(agent.workspace, agent.memory))
+        items = self.transcript
+        summary = self._latest_summary()
+        if summary is not None:
+            # Messages before a summary are kept for display and export, not sent.
+            messages.append(summary_message(self.transcript[summary]["content"]))
+            items = self.transcript[summary + 1 :]
+        for item in items:
             role = item.get("role")
             content = item.get("api_content", item.get("content"))
             if role in {"user", "assistant"} and isinstance(content, str):
-                messages.append({"role": role, "content": content})
-        selection = select_context(messages, self.settings)
+                message: dict[str, Any] = {"role": role, "content": content}
+                if role == "assistant" and item.get("tool_calls"):
+                    message["tool_calls"] = item["tool_calls"]
+                messages.append(message)
+            elif role == "tool" and isinstance(content, str):
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": item.get("tool_call_id", ""),
+                        "name": item.get("name", ""),
+                        "content": content,
+                    }
+                )
+        if agent is None:
+            selection = select_context(messages, self.settings)
+        else:
+            selection = self._select_agent_context(messages)
         self.context_omitted_messages = selection.omitted_messages
         return selection.messages
+
+    def _select_agent_context(self, messages: list[dict[str, Any]]):
+        """Fit an agent turn, shortening its oldest tool outputs only when it must.
+
+        Earlier messages are left byte-identical whenever possible so the server's
+        prompt cache can reuse their KV state on the next step.
+        """
+        try:
+            return select_context(messages, self.settings, bytes_per_token=3)
+        except MlxChatError as exc:
+            if "latest turn" not in str(exc):
+                raise
+        compacted = [dict(message) for message in messages]
+        tools = [index for index, message in enumerate(compacted) if message["role"] == "tool"]
+        for index in tools[:-1]:
+            content = compacted[index]["content"]
+            if len(content) > 600:
+                compacted[index]["content"] = (
+                    content[:400] + "\n… [older tool output shortened to fit the context]"
+                )
+            try:
+                return select_context(compacted, self.settings, bytes_per_token=3)
+            except MlxChatError as exc:
+                if "latest turn" not in str(exc):
+                    raise
+        raise MlxChatError(
+            "This agent turn no longer fits the context budget. Start a /new conversation, "
+            "or raise --context-tokens if the model supports a longer context."
+        )
+
+    def _latest_summary(self) -> int | None:
+        for index in range(len(self.transcript) - 1, -1, -1):
+            if self.transcript[index].get("role") == "summary":
+                return index
+        return None
+
+    def _enable_agent(self, *, announce: bool = True) -> None:
+        workspace = Workspace(
+            self.workspace_root,
+            output_chars=self.settings.tool_output_chars,
+            web=self.settings,
+        )
+        previous = getattr(self, "agent", None)
+        self.agent = AgentState(
+            workspace,
+            approval=self.settings.approval,
+            max_steps=self.settings.agent_max_steps,
+            always_allowed=set(previous.always_allowed) if previous else set(),
+            memory=load_project_memory(workspace.root),
+        )
+        self._sync_agent_status()
+        if announce:
+            self.ui.success(
+                f"Agent is on in {display_path(workspace.root)} · approval: {self.agent.approval}."
+            )
+
+    def _sync_agent_status(self) -> None:
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            self.ui.agent_status = None
+            return
+        self.ui.agent_status = (
+            f"{agent.workspace.root.name or agent.workspace.root} · {agent.approval}"
+        )
+
+    def _conversation_size(self) -> int:
+        """Messages as the header counts them: tool steps do not add turns."""
+        return 2 * sum(1 for item in self.transcript if item.get("role") == "user")
 
     def run(self) -> int:
         self.ui.enable_conversation()
         try:
             return self._run()
         finally:
-            self.ui.set_context(self.session_name, len(self.transcript))
+            self.ui.set_context(self.session_name, self._conversation_size())
             self.ui.close_conversation()
 
     def _run(self) -> int:
-        self.ui.set_context(self.session_name, len(self.transcript))
+        self.ui.set_context(self.session_name, self._conversation_size())
         self.ui.banner(
             reused=self.start_result.reused,
             managed=self.start_result.managed,
@@ -144,7 +265,8 @@ class ChatApp:
             self.ui.info(f"Session {self.session_name!r} is active and will auto-save.")
 
         while not self.should_exit:
-            self.ui.set_context(self.session_name, len(self.transcript))
+            self.ui.set_context(self.session_name, self._conversation_size())
+            self.ui.context_share = self._context_load() if self.transcript else 0.0
             try:
                 value = self.ui.prompt()
             except EOFError:
@@ -173,6 +295,7 @@ class ChatApp:
         metadata: dict[str, Any] | None = None,
     ) -> bool:
         if prompt is not None:
+            self._maybe_compact()
             item: dict[str, Any] = {"role": "user", "content": prompt, "created_at": utc_now()}
             if self.pending_attachments:
                 item["api_content"] = attachment_prompt(
@@ -187,6 +310,9 @@ class ChatApp:
         if not self.transcript or self.transcript[-1].get("role") != "user":
             self.ui.warning("There is no user prompt to generate from.")
             return False
+
+        if getattr(self, "agent", None) is not None:
+            return self._generate_agent(prompt)
 
         try:
             messages = self.api_messages()
@@ -236,12 +362,249 @@ class ChatApp:
         self._autosave()
         return True
 
+    def _generate_agent(self, prompt: str | None) -> bool:
+        assert self.agent is not None
+        think = self.settings.think and not self.settings.concise
+        start = len(self.transcript)
+        warned = False
+
+        def build_messages():
+            nonlocal warned
+            messages = self.api_messages()
+            if self.context_omitted_messages and not warned:
+                warned = True
+                self.ui.warning(
+                    f"Context budget: {self.context_omitted_messages} older messages omitted "
+                    "from this request. The full conversation is retained."
+                )
+            return messages
+
+        self.ui.defer_metrics = True
+        try:
+            run = run_agent(self.agent, ChatAgentHost(self, think), self.transcript, build_messages)
+        except KeyboardInterrupt:
+            if prompt is not None and len(self.transcript) == start:
+                self.transcript.pop()
+            elif len(self.transcript) > start:
+                self._autosave()
+            self.ui.warning("Generation cancelled; the server is still running.")
+            return False
+        except MlxChatError as exc:
+            if prompt is not None and len(self.transcript) == start:
+                self.transcript.pop()
+            self.ui.error(str(exc))
+            return False
+        finally:
+            self.ui.defer_metrics = False
+
+        if prompt is not None:
+            self.pending_attachments = []
+        self.last_result = run.result
+        self.ui.agent_summary(run)
+        self._autosave()
+        return True
+
+    def _cmd_agent(self, args: list[str]) -> None:
+        if len(args) > 1:
+            raise MlxChatError("Usage: /agent [on|off]")
+        mode = args[0].lower() if args else ("off" if self.agent else "on")
+        if mode in {"on", "true", "1", "yes"}:
+            self._enable_agent()
+        elif mode in {"off", "false", "0", "no"}:
+            self.agent = None
+            self._sync_agent_status()
+            self.ui.success("Agent is off. Replies are plain chat without tools.")
+        else:
+            raise MlxChatError("Usage: /agent [on|off]")
+
+    def _cmd_approve(self, args: list[str]) -> None:
+        if len(args) > 1 or (args and args[0].lower() not in APPROVAL_MODES):
+            raise MlxChatError("Usage: /approve [ask|edits|all]")
+        if not args:
+            current = self.agent.approval if self.agent else self.settings.approval
+            allowed = ", ".join(sorted(self.agent.always_allowed)) if self.agent else ""
+            self.ui.info(
+                f"Approval: {current}. ask = confirm edits and commands · edits = auto-apply "
+                "file edits, confirm commands · all = run everything without asking."
+                + (f"\nAlways allowed this session: {allowed}" if allowed else "")
+            )
+            return
+        self.settings.approval = args[0].lower()
+        if self.agent is not None:
+            self.agent.approval = self.settings.approval
+            if self.settings.approval == "ask":
+                self.agent.always_allowed.clear()
+        self._sync_agent_status()
+        self.ui.success(f"Approval set to {self.settings.approval}.")
+
+    # Context compaction
+
+    def _turn_starts(self, start: int) -> list[int]:
+        return [
+            index
+            for index in range(start, len(self.transcript))
+            if self.transcript[index].get("role") == "user"
+        ]
+
+    def _context_load(self) -> float:
+        """The share of the request budget the next request would use."""
+        agent = getattr(self, "agent", None)
+        budget = self.settings.context_tokens - self.settings.max_tokens - TEMPLATE_RESERVE
+        try:
+            messages = self.api_messages()
+        except MlxChatError:
+            return 1.0
+        if self.context_omitted_messages:
+            return 1.0
+        selection = select_context(messages, self.settings, bytes_per_token=3 if agent else 1)
+        return selection.estimated_tokens / max(1, budget)
+
+    def _maybe_compact(self) -> None:
+        if not hasattr(self, "client") or getattr(self.settings, "compact_at", 0) <= 0:
+            return
+        summary = self._latest_summary()
+        if len(self._turn_starts(0 if summary is None else summary + 1)) < 3:
+            return
+        if self._context_load() < self.settings.compact_at / 100:
+            return
+        try:
+            self._compact(automatic=True)
+        except (MlxChatError, OSError) as exc:
+            self.ui.warning(f"Could not summarize older messages: {exc}")
+
+    def _compact(self, *, automatic: bool = False, keep_turns: int = 2) -> None:
+        summary = self._latest_summary()
+        start = 0 if summary is None else summary + 1
+        turns = self._turn_starts(start)
+        if len(turns) <= keep_turns:
+            raise MlxChatError("There is not enough earlier conversation to summarize yet.")
+        cut = turns[-keep_turns] if keep_turns else len(self.transcript)
+        previous = self.transcript[summary]["content"] if summary is not None else ""
+        older = self.transcript[start:cut]
+        request = compaction_request(previous, older, self.settings)
+        label = "Summarizing older messages to free context…"
+        result = self.ui.run_task(
+            lambda: self.client.collect(request, think=False),
+            label=label,
+        )
+        text = result.answer.strip()
+        if not text:
+            raise MlxChatError("The model returned an empty summary.")
+        item = {
+            "role": "summary",
+            "content": text,
+            "covers": len(older)
+            + (self.transcript[summary].get("covers", 0) if summary is not None else 0),
+            "created_at": utc_now(),
+        }
+        self.transcript.insert(cut, item)
+        self._autosave()
+        self.ui.summary_notice(item, automatic=automatic)
+
+    def _cmd_compact(self, args: list[str]) -> None:
+        if args:
+            raise MlxChatError("Usage: /compact")
+        self._compact(keep_turns=1)
+
+    # Plans and project memory
+
+    def _cmd_plan(self, args: list[str]) -> None:
+        if not args:
+            plan = self.agent.workspace.plan if self.agent else []
+            if not plan:
+                self.ui.info("No plan yet. Use /plan TASK to plan before making changes.")
+            else:
+                self.ui.plan_card(plan)
+            return
+        if self.agent is None:
+            raise MlxChatError("Plans need agent mode. Turn it on with /agent on.")
+        task = " ".join(args)
+        self.agent.read_only = True
+        try:
+            self.ui.user_message(f"/plan {task}")
+            done = self._generate(task, api_content=PLAN_REQUEST.format(task=task))
+            while done:
+                decision, feedback = self.ui.ask_plan()
+                if decision == "revise":
+                    self.ui.user_message(feedback)
+                    done = self._generate(
+                        feedback, api_content=REVISE_REQUEST.format(feedback=feedback)
+                    )
+                    continue
+                if decision == "run":
+                    self.agent.read_only = False
+                    self.ui.user_message("Run the plan.")
+                    self._generate("Run the plan.", api_content=EXECUTE_REQUEST)
+                else:
+                    self.ui.info("Plan kept. Say “go” or describe changes when you are ready.")
+                break
+        finally:
+            self.agent.read_only = False
+
+    def _cmd_memory(self, args: list[str]) -> None:
+        root = self.agent.workspace.root if self.agent else self.workspace_root
+        if args and args[0] == "add":
+            note = " ".join(args[1:]).strip()
+            if not note:
+                raise MlxChatError("Usage: /memory add TEXT")
+            path = root / PROJECT_MEMORY_FILES[0]
+            existing = path.read_text(encoding="utf-8") if path.exists() else "# Agent notes\n"
+            separator = "" if existing.endswith("\n") else "\n"
+            path.write_text(f"{existing}{separator}- {note}\n", encoding="utf-8")
+            args = ["reload"]
+            self.ui.success(f"Added to {display_path(path)}.")
+        if args and args[0] == "reload":
+            if self.agent is not None:
+                self.agent.memory = load_project_memory(root)
+            names = ", ".join(name for name, _ in load_project_memory(root)) or "none"
+            self.ui.success(f"Project memory reloaded: {names}.")
+            return
+        if args:
+            raise MlxChatError("Usage: /memory [add TEXT|reload]")
+        memory = load_project_memory(root)
+        if not memory:
+            self.ui.info(
+                "No project memory yet. Create AGENTS.md in the project (or use /memory add "
+                "TEXT) with your test command, conventions, and anything the agent should know."
+            )
+            return
+        for name, text in memory:
+            self.ui.console.print(
+                Panel(
+                    Text(sanitize_terminal_text(text)),
+                    title=Text(f"{name} · loaded into every agent turn"),
+                    border_style="bright_cyan",
+                )
+            )
+
+    def _cmd_tools(self) -> None:
+        workspace = self.agent.workspace if self.agent else Workspace(self.workspace_root)
+        approval = self.agent.approval if self.agent else self.settings.approval
+        allowed = self.agent.always_allowed if self.agent else set()
+        table = Table(box=box.SIMPLE, show_header=True, pad_edge=False)
+        table.add_column("Tool", no_wrap=True)
+        table.add_column("Needs approval", no_wrap=True)
+        table.add_column("What it does")
+        for tool in workspace.tools.values():
+            needs = workspace.needs_approval(tool.name, approval, allowed)
+            table.add_row(Text(tool.name), Text("yes" if needs else "no"), Text(tool.description))
+        state = "on" if self.agent else "off"
+        self.ui.console.print(
+            Panel(
+                table,
+                title=f"Agent tools · {state} · {display_path(workspace.root)}",
+                border_style="bright_cyan",
+            )
+        )
+
     def _handle_command(self, value: str) -> None:
         command = value.split()[0].lower() if value.split() else ""
         popup = getattr(self.ui, "command_popup", None)
         if popup is not None and command not in {
             "/voice",
             "/web",
+            "/plan",
+            "/compact",
             "/retry",
             "/load",
             "/undo",
@@ -280,6 +643,20 @@ class ChatApp:
         try:
             if command == "/help":
                 self.ui.help()
+            elif command == "/agent":
+                self._cmd_agent(args)
+            elif command == "/approve":
+                self._cmd_approve(args)
+            elif command == "/plan":
+                self._cmd_plan(args)
+            elif command == "/memory":
+                self._cmd_memory(args)
+            elif command == "/compact":
+                self._cmd_compact(args)
+            elif command == "/tools":
+                if args:
+                    raise MlxChatError("Usage: /tools")
+                self._cmd_tools()
             elif command == "/web":
                 self._cmd_web(args)
             elif command == "/attach":
@@ -556,18 +933,19 @@ class ChatApp:
         )
 
     def _cmd_retry(self) -> None:
-        removed_assistant = None
+        removed: list[dict[str, Any]] = []
         previous_result = self.last_result
-        if self.transcript and self.transcript[-1].get("role") == "assistant":
-            removed_assistant = self.transcript.pop()
+        while self.transcript and self.transcript[-1].get("role") in {"assistant", "tool"}:
+            removed.insert(0, self.transcript.pop())
         if not self.transcript or self.transcript[-1].get("role") != "user":
-            if removed_assistant is not None:
-                self.transcript.append(removed_assistant)
+            self.transcript.extend(removed)
             self.ui.warning("There is no completed turn to retry.")
             return
         if not self._generate():
-            if removed_assistant is not None:
-                self.transcript.append(removed_assistant)
+            # Drop any partial agent steps from the failed retry before restoring.
+            while self.transcript and self.transcript[-1].get("role") != "user":
+                self.transcript.pop()
+            self.transcript.extend(removed)
             self.last_result = previous_result
             self._autosave()
 
@@ -575,7 +953,7 @@ class ChatApp:
         if not self.transcript:
             self.ui.warning("Conversation is already empty.")
             return
-        if self.transcript[-1].get("role") == "assistant":
+        while self.transcript and self.transcript[-1].get("role") in {"assistant", "tool"}:
             self.transcript.pop()
         if self.transcript and self.transcript[-1].get("role") == "user":
             self.transcript.pop()
@@ -595,6 +973,8 @@ class ChatApp:
             ("endpoint", self.settings.base_url),
             ("thinking", "on" if self.settings.think else "off"),
             ("concise", "on" if self.settings.concise else "off"),
+            ("agent", f"on · {display_path(self.agent.workspace.root)}" if self.agent else "off"),
+            ("approval", self.agent.approval if self.agent else self.settings.approval),
             ("temperature", f"{self.settings.temperature:g}"),
             ("top_p", f"{self.settings.top_p:g}"),
             ("top_k", str(self.settings.top_k)),
@@ -678,7 +1058,13 @@ class ChatApp:
 
     def _cmd_model(self, args: list[str]) -> None:
         if not args:
-            presets = ", ".join(f"{name} ({model})" for name, model in MODEL_PRESETS.items())
+            from .hardware import memory_gib, recommended_preset
+
+            best = recommended_preset(memory_gib())
+            presets = ", ".join(
+                f"{name} ({model}{' · recommended for this Mac' if name == best else ''})"
+                for name, model in MODEL_PRESETS.items()
+            )
             self.ui.info(f"Current model: {self.settings.model}. Presets: {presets}")
             return
         model = resolve_model_preset(args[0])
@@ -776,6 +1162,9 @@ class ChatApp:
         self.manager = new_manager
         self.client = new_client
         self.start_result = new_result
+        if getattr(self, "agent", None) is not None:
+            # A new model may support tool calling even if the previous one did not.
+            self.agent.tools_supported = True
         self._autosave()
         self.ui.success(f"Ready with {model}.")
 
@@ -827,7 +1216,7 @@ class ChatApp:
         self.last_result = restored.last_result
         if announce:
             saved_model = restored.model
-            self.ui.set_context(self.session_name, len(self.transcript))
+            self.ui.set_context(self.session_name, self._conversation_size())
             self.ui.restore_transcript(self.transcript)
             self.ui.success(f"Loaded session {name!r} ({len(self.transcript)} messages).")
             if saved_model and saved_model != self.settings.model:
@@ -910,6 +1299,21 @@ class ChatApp:
                 lines.extend(["## System", "", self.settings.system_prompt, ""])
             for item in self.transcript:
                 role = str(item.get("role", "message")).title()
+                if item.get("role") == "summary":
+                    lines.extend(["## Summary of earlier messages", "", str(item["content"]), ""])
+                    continue
+                if item.get("role") == "tool":
+                    lines.extend(
+                        [
+                            f"### Tool: {item.get('name', '')} · {item.get('summary', '')}",
+                            "",
+                            "```",
+                            str(item.get("diff") or item.get("content", "")).rstrip(),
+                            "```",
+                            "",
+                        ]
+                    )
+                    continue
                 if item.get("reasoning"):
                     lines.extend(["## Reasoning", "", str(item["reasoning"]), ""])
                 lines.extend([f"## {role}", "", str(item.get("content", "")), ""])
@@ -945,3 +1349,77 @@ class ChatApp:
         self.ui.server_stopped = True
         self.ui.success("Server stopped. Model memory has been released.")
         self.should_exit = True
+
+
+class ChatAgentHost:
+    """Connect the agent loop to the chat view."""
+
+    def __init__(self, app: ChatApp, think: bool):
+        self.app = app
+        self.think = think
+
+    def generate(self, messages, tools):
+        app = self.app
+        return app.ui.render_generation(
+            lambda callback: app.client.collect(
+                messages,
+                think=self.think,
+                on_event=callback,
+                cancel_event=getattr(app.ui, "cancellation_event", None),
+                tools=tools,
+            ),
+            think=self.think,
+        )
+
+    def approve(self, call: ToolCall, preview):
+        return self.app.ui.ask_approval(call.name, call.raw_arguments, preview)
+
+    def execute(self, call: ToolCall, run):
+        from .rendering import TOOL_LABELS, tool_description
+
+        label = f"{TOOL_LABELS.get(call.name, call.name)} " + tool_description(
+            {"name": call.name, "arguments": call.raw_arguments}
+        )
+        return self.app.ui.run_tool(label.strip() + "…", run)
+
+    def tool_finished(self, item):
+        self.app.ui.tool_result(item)
+
+    def notice(self, message: str) -> None:
+        self.app.ui.warning(message)
+
+
+def compaction_request(previous: str, items: list[dict[str, Any]], settings: Settings):
+    """A plain request asking the model to condense older turns."""
+    lines = []
+    if previous:
+        lines.append(f"[Earlier summary]\n{previous}")
+    for item in items:
+        role = item.get("role")
+        content = str(item.get("api_content") or item.get("content") or "")
+        if role == "tool":
+            content = f"{item.get('name')}: {item.get('summary', '')}\n{content[:300]}"
+        elif role == "assistant" and item.get("tool_calls"):
+            names = ", ".join(call["function"]["name"] for call in item["tool_calls"])
+            content = f"{content}\n(called {names})".strip()
+        if content:
+            lines.append(f"[{role}]\n{content[:4000]}")
+    budget = (settings.context_tokens - settings.max_tokens - TEMPLATE_RESERVE) * 3 - 2000
+    text = "\n\n".join(lines)
+    if len(text) > budget:
+        text = "…\n" + text[-budget:]
+    return [
+        {
+            "role": "system",
+            "content": "You write compact, faithful summaries of work sessions.",
+        },
+        {
+            "role": "user",
+            "content": (
+                "Summarize this conversation so it can replace the original messages. Keep "
+                "the user's goals and preferences, decisions, files changed, commands run "
+                "and their results, errors, and anything left to do. Use short bullet points, "
+                "at most 300 words.\n\n" + text
+            ),
+        },
+    ]

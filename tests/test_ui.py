@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.text import Text
 
 from mlx_chat.client import GenerationResult, StreamEvent
+from mlx_chat.theme import SURFACE
 from mlx_chat.ui import TerminalUI, sanitize_terminal_text, short_model
 
 
@@ -144,7 +145,7 @@ def test_user_boxes_use_full_width_and_grow_vertically():
     spinner_row = next(row for row in rows if "Listening" in row)
     assert len(spinner_row) == 50
     assert not any(char in "".join(rows) for char in "│╭╰")
-    assert ui.user_line("hello").style == "on #15191d"
+    assert ui.user_line("hello").style == f"on {SURFACE}"
     assert ui.chat_panel(Text("answer")).style == ""
 
 
@@ -195,22 +196,24 @@ def test_info_panel_shows_explicit_thinking_and_audio_readiness(
     console = Console(file=output, width=160, color_system=None)
     console.print(ui.info_panel())
     content = output.getvalue()
-    assert len(content.splitlines()) == 4
+    assert len(content.splitlines()) == 2
     assert "Ready" not in content
-    assert content.index("TTS:") < content.index("STT:") < content.index("Session:")
-    assert f"Thinking: {expected}" in content
+    assert content.index("mlx-chat") < content.index("Qwen3-4B-4bit") < content.index("unsaved")
+    assert ("thinking" in content) == (expected == "on")
     assert "Direct" not in content
-    assert "Turns: 3" in content
-    assert "STT: whisper-large-v3-turbo · not loaded" in content
-    assert "TTS: Kokoro-82M-bf16 · not loaded" in content
+    assert "3 turns" in content
+    assert "voice ready" not in content
     monkeypatch.setattr(voice, "_model_ready", True)
     monkeypatch.setattr(tts, "_engine", object())
     output.seek(0)
     output.truncate(0)
+    ui.agent_status = "proj · ask"
+    ui.context_share = 0.5
     console.print(ui.info_panel())
     content = output.getvalue()
-    assert "STT: whisper-large-v3-turbo · ready" in content
-    assert "TTS: Kokoro-82M-bf16 · ready" in content
+    assert "voice ready" in content
+    assert "agent proj · ask" in content
+    assert "context ▰▰▰▰▱▱▱▱ 50%" in content
 
 
 def test_thinking_spinner_animates_and_label_remains_clickable(monkeypatch):

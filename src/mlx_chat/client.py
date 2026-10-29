@@ -33,6 +33,7 @@ class GenerationResult:
     finish_reason: str | None = None
     elapsed: float = 0.0
     first_token_seconds: float | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def completion_tokens(self) -> int | None:
@@ -46,6 +47,14 @@ class GenerationResult:
         if not self.completion_tokens or self.elapsed <= 0:
             return None
         return self.completion_tokens / self.elapsed
+
+    @property
+    def cached_tokens(self) -> int | None:
+        details = self.usage.get("prompt_tokens_details")
+        value = details.get("cached_tokens") if isinstance(details, dict) else None
+        return (
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+        )
 
 
 class ThinkTagSplitter:
@@ -95,6 +104,34 @@ class ThinkTagSplitter:
         output = [(self._state, self._pending)]
         self._pending = ""
         return output
+
+
+def merge_tool_call_deltas(calls: list[dict[str, Any]], deltas: Any) -> None:
+    """Merge streamed tool calls, whether complete (MLX-LM) or incremental (OpenAI)."""
+    if not isinstance(deltas, list):
+        return
+    for delta in deltas:
+        if not isinstance(delta, dict):
+            continue
+        index = delta.get("index")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            # Without an index, an id starts a new call and other chunks extend the last one.
+            index = len(calls) if not calls or delta.get("id") else len(calls) - 1
+        while len(calls) <= index:
+            calls.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+        target = calls[index]
+        if isinstance(delta.get("id"), str) and delta["id"]:
+            target["id"] = delta["id"]
+        function = delta.get("function")
+        if not isinstance(function, dict):
+            continue
+        if isinstance(function.get("name"), str) and function["name"]:
+            target["function"]["name"] = function["name"]
+        arguments = function.get("arguments")
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        if isinstance(arguments, str):
+            target["function"]["arguments"] += arguments
 
 
 def _extract_text(value: Any) -> str:
@@ -153,11 +190,12 @@ class ChatClient:
 
     def payload(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         think: bool,
         stream: bool = True,
         max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         # Qwen publishes distinct recommended profiles for thinking and direct replies.
         temperature = self.settings.temperature
@@ -179,19 +217,22 @@ class ChatClient:
         }
         if stream:
             value["stream_options"] = {"include_usage": True}
+        if tools:
+            value["tools"] = tools
         return value
 
     def stream_chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         think: bool,
         cancel_event: Any = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> Iterator[StreamEvent]:
         splitter = ThinkTagSplitter()
         native_reasoning = False
         saw_done = False
-        payload = self.payload(messages, think=think, stream=True)
+        payload = self.payload(messages, think=think, stream=True, tools=tools)
         request = urllib.request.Request(
             f"{self.base_url}/v1/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -273,6 +314,8 @@ class ChatClient:
                         for kind, text in splitter.feed(content):
                             if text:
                                 yield StreamEvent(kind, text=text, raw=packet)
+                if delta.get("tool_calls"):
+                    yield StreamEvent("tool_calls", raw={"tool_calls": delta["tool_calls"]})
                 if finish_reason:
                     yield StreamEvent("finish", finish_reason=str(finish_reason), raw=packet)
 
@@ -289,16 +332,17 @@ class ChatClient:
 
     def collect(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         think: bool,
         on_event: Any = None,
         cancel_event: Any = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> GenerationResult:
         result = GenerationResult()
         started = time.monotonic()
         first = None
-        stream = self.stream_chat(messages, think=think, cancel_event=cancel_event)
+        stream = self.stream_chat(messages, think=think, cancel_event=cancel_event, tools=tools)
         try:
             for event in stream:
                 if event.kind in {"reasoning", "content"} and event.text:
@@ -310,6 +354,10 @@ class ChatClient:
                         result.answer += event.text
                 elif event.kind == "usage" and event.usage:
                     result.usage.update(event.usage)
+                elif event.kind == "tool_calls" and event.raw:
+                    if first is None:
+                        first = time.monotonic()
+                    merge_tool_call_deltas(result.tool_calls, event.raw.get("tool_calls"))
                 elif event.kind == "finish":
                     result.finish_reason = event.finish_reason
                 if on_event is not None:

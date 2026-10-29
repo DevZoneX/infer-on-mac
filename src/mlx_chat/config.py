@@ -50,6 +50,11 @@ class Settings:
     web_timeout: int = 10
     web_region: str = "us-en"
     web_safesearch: str = "moderate"
+    agent: bool = True
+    approval: str = "ask"
+    agent_max_steps: int = 30
+    tool_output_chars: int = 12000
+    compact_at: int = 75
     server_args: list[str] | None = None
 
     def __post_init__(self) -> None:
@@ -58,12 +63,12 @@ class Settings:
         self.validate()
 
     def validate(self) -> None:
-        for key in ("model", "host", "web_region", "system_prompt", "web_safesearch"):
+        for key in ("model", "host", "web_region", "system_prompt", "web_safesearch", "approval"):
             value = getattr(self, key)
             if not isinstance(value, str) or (key != "system_prompt" and not value.strip()):
                 label = {"model": "Model name", "host": "Host"}.get(key, key)
                 raise MlxChatError(f"{label} must be non-empty text.")
-        for key in ("think", "concise", "preload_voice"):
+        for key in ("think", "concise", "preload_voice", "agent"):
             if not isinstance(getattr(self, key), bool):
                 raise MlxChatError(f"{key} must be a boolean.")
         numbers = {
@@ -80,6 +85,9 @@ class Settings:
             "context_tokens": ("context_tokens", int, 1, None),
             "web_results": ("web_results", int, 1, 10),
             "web_timeout": ("web_timeout", int, 1, 60),
+            "agent_max_steps": ("agent_max_steps", int, 1, 200),
+            "tool_output_chars": ("tool_output_chars", int, 1000, 200000),
+            "compact_at": ("compact_at", int, 0, 100),
         }
         for key, (label, kind, minimum, maximum) in numbers.items():
             value = getattr(self, key)
@@ -100,6 +108,8 @@ class Settings:
                 raise MlxChatError(f"{label} must be finite and {limit}.")
         if self.context_tokens <= self.max_tokens + 256:
             raise MlxChatError("context_tokens must exceed max_tokens by more than 256 tokens.")
+        if self.approval not in {"ask", "edits", "all"}:
+            raise MlxChatError("approval must be ask, edits, or all.")
         if self.web_safesearch not in {"on", "moderate", "off"}:
             raise MlxChatError("web_safesearch must be on, moderate, or off.")
         if not isinstance(self.server_args, list) or not all(

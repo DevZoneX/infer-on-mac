@@ -13,6 +13,7 @@ from rich.text import Text
 
 from mlx_chat.client import GenerationResult, StreamEvent
 from mlx_chat.config import Settings
+from mlx_chat.theme import POPUP, SELECTION
 from mlx_chat.ui import TerminalUI
 
 
@@ -155,7 +156,7 @@ def test_mouse_wheel_moves_rendered_viewport_without_cursor_reset(monkeypatch, t
         assert not view.follow
         assert headers[0] == headers[1]
         assert "mlx-chat" in headers[0]
-        assert "Thinking:" in headers[0]
+        assert "Qwen3-4B-4bit" in headers[0]
         assert "Ready" not in "".join(fragment[1] for fragment in view.fragments())
         ui.close_conversation()
 
@@ -350,7 +351,7 @@ def test_answer_metrics_are_unboxed_dim_metadata(monkeypatch, tmp_path):
         assert metadata.style == "dim"
         assert metadata.no_wrap
         assert "0.5s" in metadata.plain
-        assert "TTFT 0.1s" in metadata.plain
+        assert "first token 0.1s" in metadata.plain
         assert "◆" not in metadata.plain
         lines = ui.console.render_lines(metadata, ui.console.options, pad=False)
         assert all(
@@ -448,7 +449,7 @@ def test_popup_design_keeps_title_and_footer_separate_from_scrollable_body(monke
         assert "close" not in "".join(part[1] for part in heading)
         assert "Enter/Esc" not in "".join(part[1] for part in heading)
         assert "scroll" not in "".join(part[1] for part in heading)
-        assert any("bg:#23282e" in part[0] for part in body)
+        assert any(f"bg:{POPUP}" in part[0] for part in body)
         assert view.fragments() != before
         view.popup_offset = 10
         assert view.popup_heading() == heading
@@ -501,7 +502,7 @@ def test_drag_selects_and_copies_while_mouse_scrolling_stays_enabled(monkeypatch
         fragments, _ = view.selection_fragments(
             "Hello world", Style(color="white"), 0, 0, popup=popup
         )
-        assert any("bg:#506174" in part[0] for part in fragments[:5])
+        assert any(f"bg:{SELECTION}" in part[0] for part in fragments[:5])
         view.selection = (popup, (1, 6), (0, 6))
         assert view.selected_text() == "world\nSecond"
 
@@ -761,11 +762,11 @@ def test_generation_stats_have_two_blank_rows_before_next_user_message(monkeypat
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         ui = TerminalUI(Settings())
         ui.enable_conversation()
-        ui.generation_info("3.0s · TTFT 0.1s")
+        ui.generation_info("3.0s · first token 0.1s")
         ui.user_message("Next question")
         ui._conversation.prepare_lines()
         rows = ["".join(segment.text for segment in line) for line in ui._conversation._lines]
-        stats_row = next(i for i, row in enumerate(rows) if "TTFT" in row)
+        stats_row = next(i for i, row in enumerate(rows) if "first token" in row)
         next_row = next(i for i, row in enumerate(rows) if "Next question" in row)
         assert next_row - stats_row >= 4
         assert all(not row.strip() for row in rows[stats_row + 1 : next_row])

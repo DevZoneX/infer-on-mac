@@ -35,6 +35,7 @@ from rich.style import Style
 from rich.text import Text
 
 from .errors import MlxChatError
+from .rendering import LivePreview
 from .terminal import copy_text
 from .theme import ACCENT, CANVAS, MUTED, POPUP, SELECTION
 
@@ -144,6 +145,7 @@ class ConversationView:
         self.submitted_inputs = deque()
         self.draft_text = ""
         self.audio_key = None
+        self.approval = False
         self._audio_stop_deadline = None
         self._audio_popup_timer = None
         self.cancelled = threading.Event()
@@ -151,6 +153,8 @@ class ConversationView:
         self._cache_key = None
         self._lines = []
         self._history_width = None
+        self._pending_body_key = None
+        self._pending_body_lines = []
         self._history_line_count = 0
         self._rendered_item_count = 0
         self.window = Window(
@@ -257,8 +261,8 @@ class ConversationView:
         session._output = session.app.output
         session.app.full_screen = True
         session.app.renderer = ConversationRenderer(session.app.renderer)
-        session.refresh_interval = 0.1
-        session.app.refresh_interval = 0.1
+        session.refresh_interval = 1 / 12
+        session.app.refresh_interval = 1 / 12
         session.app.min_redraw_interval = 1 / 30
         session.mouse_support = True
         session.default_buffer.read_only = Condition(
@@ -384,6 +388,8 @@ class ConversationView:
         app.invalidate()
 
     def composer_placeholder(self):
+        if getattr(self, "approval", False):
+            return self.approval
         if self.busy and self.allow_input:
             return "Add a message… Return to redirect"
         if self.busy:
@@ -822,7 +828,7 @@ class ConversationView:
         key = (
             width,
             self._revision,
-            int(time.monotonic() * 10) if animated else 0,
+            int(time.monotonic() * 12) if animated else 0,
             self.popup_items is not None,
         )
         if key == self._cache_key:
@@ -842,7 +848,20 @@ class ConversationView:
         self._rendered_item_count = len(self.items)
         self._history_line_count = len(self._lines)
         if animated:
-            self._lines.extend(self.ui.console.render_lines(self.pending, options, pad=False))
+            pending = self.pending
+            if isinstance(pending, LivePreview):
+                # Only the one-line footer animates; reuse the body until it changes.
+                if self._pending_body_key != (id(pending), width):
+                    self._pending_body_lines = self.ui.console.render_lines(
+                        pending.body, options, pad=False
+                    )
+                    self._pending_body_key = (id(pending), width)
+                self._lines.extend(self._pending_body_lines)
+                self._lines.extend(
+                    self.ui.console.render_lines(pending.footer(), options, pad=False)
+                )
+            else:
+                self._lines.extend(self.ui.console.render_lines(pending, options, pad=False))
         self.line_count = len(self._lines)
         self._cache_key = key
 

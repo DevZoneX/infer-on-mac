@@ -1,204 +1,126 @@
+<div align="center">
+
 # mlx-chat
 
-Terminal chat with local MLX models on Apple Silicon Macs. `mlx-chat` starts an
-MLX-LM server, streams answers, and saves conversations when you ask it to.
+**A local coding agent and chat for your terminal, running on Apple Silicon.**
 
-The default installation supports text chat. Voice input, speech output, and
-web search are optional. File context and prompt profiles need no extra packages.
+[![Version](https://img.shields.io/badge/version-0.2.0-a5b4fc)](CHANGELOG.md)
+[![Checks](https://github.com/DevZoneX/infer-on-mac/actions/workflows/checks.yml/badge.svg)](https://github.com/DevZoneX/infer-on-mac/actions/workflows/checks.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white)](#requirements)
+[![MLX](https://img.shields.io/badge/powered%20by-MLX-c084fc)](https://github.com/ml-explore/mlx-lm)
+[![License](https://img.shields.io/badge/license-MIT-22d3ee)](LICENSE)
+
+<img src="assets/demo.gif" alt="mlx-chat fixing a failing test: it reads the code, proposes an edit for approval, runs the tests, and reports the result" width="820">
+
+</div>
+
+mlx-chat runs open models such as Qwen3 locally with [MLX-LM](https://github.com/ml-explore/mlx-lm).
+It reads, searches, and edits the project you launch it in, runs commands, and asks
+before anything changes. Nothing leaves your Mac.
+
+## Features
+
+- **Agent tools.** Lists, searches, outlines, and reads files. Edits files with a diff
+  preview and runs shell commands. Every tool is confined to the workspace.
+- **Approvals.** You choose what runs without asking: nothing (`ask`), file edits
+  (`edits`), or everything (`all`).
+- **Plan mode.** `/plan` explores read-only and proposes steps for you to run or revise.
+- **Project memory.** Reads `AGENTS.md`, `CLAUDE.md`, or `.mlx-chat/instructions.md`.
+- **Long sessions.** Older turns are compacted automatically, and a context meter shows usage.
+- **Fast on a Mac.** Earlier messages stay byte-identical so the server's prompt cache
+  reuses them, and the cache is sized to your unified memory.
+- **Chat extras.** File attachments, prompt profiles, saved sessions, one-off scripted
+  runs with JSON output, optional voice input and speech, and optional web search.
 
 ## Requirements
 
-- An Apple Silicon Mac running macOS 14 or newer
-- Python 3.11 or newer; the installer uses Python 3.11 when `uv` is available
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) recommended
-- Disk space and unified memory for your chosen model
-
-Intel Macs, Linux, and Windows are not supported for inference. Model size,
-conversation length, and other running apps all affect memory use.
+- Apple Silicon Mac, macOS 14 or newer
+- Python 3.11+ ([uv](https://docs.astral.sh/uv/) recommended)
+- Enough unified memory for the model you pick (see [Models](#models))
 
 ## Install
 
 ```sh
 git clone https://github.com/DevZoneX/infer-on-mac.git
 cd infer-on-mac
-./setup.sh
+./setup.sh            # add --web and/or --voice for optional features
 ```
 
-The installer creates `.venv` and links `mlx-chat` into `~/.local/bin`. If that
-directory is not on your `PATH`, use `./mlx-chat` from the checkout or add:
+The installer creates `.venv` and links `mlx-chat` into `~/.local/bin`.
+Other options are in the [installation reference](docs/REFERENCE.md#installation).
+
+## Quick start
 
 ```sh
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Optional features:
-
-```sh
-./setup.sh --voice
-./setup.sh --web
-./setup.sh --voice --web
-```
-
-Pass every extra you want to keep when rerunning the installer. `uv sync` removes
-optional packages that were not selected. For voice transcription, also install
-[FFmpeg](https://ffmpeg.org/); with Homebrew, use `brew install ffmpeg`.
-
-See the [installation reference](docs/REFERENCE.md#installation) for direct `uv`
-and `pip` commands, custom installation paths, and updating the checkout.
-
-## Start a conversation
-
-```sh
-mlx-chat small
-```
-
-The first launch downloads the model from Hugging Face. Later launches use the
-cache and reuse a compatible running server when available.
-
-Type a message and press Enter. Use `/help` for commands. The normal interface
-supports scrolling and streamed Markdown. `--plain` displays completed responses
-without the full-screen view.
-
-```text
-/save notes
-/exit
-```
-
-`/save notes` creates a named session; named sessions save after completed turns.
-`/exit` leaves the model server running. Use `/stop` instead to shut down the
-managed server, or run `mlx-chat stop` from another terminal.
-
-An unnamed conversation is not saved automatically. Load a saved session with
-`mlx-chat --session notes` or `/load notes`.
-
-## Model shortcuts
-
-| Shortcut | Model repository |
-| --- | --- |
-| `tiny` (default) | `mlx-community/Qwen3-4B-4bit` |
-| `small` | `mlx-community/Qwen3-8B-4bit` |
-| `medium` | `mlx-community/Qwen3-30B-A3B-4bit` |
-| `large` | `mlx-community/Llama-3.3-70B-Instruct-4bit` |
-
-These are shortcuts, not automatic memory-fit checks. You can also supply an
-MLX-compatible Hugging Face model ID or a local MLX model directory.
-
-```sh
+cd ~/code/my-app
 mlx-chat medium
-mlx-chat /path/to/mlx-model
 ```
 
-Use `/model small` to switch during chat. The model cards describe each model's
-requirements and license. The app's license does not cover downloaded weights.
-
-## Files and profiles
-
-Attach a text file or a directory to the next message:
+The first launch downloads the model from Hugging Face. Then describe the task:
 
 ```text
-/attach src/mlx_chat/client.py
-Explain how streaming works.
-/profile coding
-/attach src/mlx_chat
-Suggest a focused refactor of the attached code.
+The empty-title test fails. Fix it and run the tests.
 ```
 
-Attachments are read-only excerpts. The app lists included files, marks clipped
-files, and keeps their snapshots in the conversation. It does not execute code
-or index the whole project. `/attach` lists pending files; `/detach` clears them.
+When the agent wants to change something, an approval card appears. Press Return to
+allow it once, `a` to always allow that tool, or `n` to decline. You can also type
+an instruction instead. Press Esc to stop a turn.
 
-Profiles set instructions and generation settings without switching the model:
+## Usage
 
-```text
-/profile writing
-/system Help edit technical documentation.
-/profile save docs
-/profile docs
-```
+| Command | What it does |
+| --- | --- |
+| `/plan TASK` | Explore read-only, then propose a plan to run or revise |
+| `/approve ask\|edits\|all` | Set what runs without asking |
+| `/memory`, `/memory add TEXT` | Show the project memory, or append a note to `AGENTS.md` |
+| `/compact` | Summarize older turns to free context |
+| `/tools` | List the tools and which ones need approval |
+| `/agent off` | Switch to plain chat |
+| `/attach PATH` | Add a file or folder to the next message |
+| `/profile NAME` | Switch between `default`, `coding`, `writing`, or a saved profile |
+| `/model NAME` | Switch models |
+| `/save NAME`, `/load NAME` | Save or restore a session |
+| `/help` | List every command |
 
-The built-in profiles are `default`, `coding`, and `writing`. See
-[file context](docs/REFERENCE.md#file-and-project-context) for selection limits
-and [profiles](docs/REFERENCE.md#prompt-profiles) for custom presets.
-
-## One-off prompts
+From the shell:
 
 ```sh
-mlx-chat run "Explain unified memory briefly." --concise
-mlx-chat run "Review this file." --profile coding --file src/mlx_chat/client.py
-printf '%s\n' 'Summarize this text.' | mlx-chat run - --json
+mlx-chat run "Fix the failing test" --agent --approve edits   # non-interactive agent run
+mlx-chat run "Summarize this file." --file notes.md --json     # one-off answer as JSON
+mlx-chat doctor                                                # check the setup and suggest a model
+mlx-chat serve | status | logs | stop                          # manage the local server
 ```
 
-`--json` returns a result envelope containing the answer, reasoning, usage, and
-metrics. It does not enforce a JSON schema on the answer. Add `--ephemeral` to
-stop a server started by this invocation when it exits.
+Use `--approve all` only in a folder you can restore, such as a clean git checkout.
 
-## Voice and web search
+## Models
 
-With the `voice` extra installed, F1 starts recording and F2 reads the latest
-answer aloud. F3 stops recording or playback. Hold Fn for function keys if your
-Mac uses them for hardware controls. The models load on first use; speech output
-uses one English Kokoro voice.
+| Shortcut | Model | Notes |
+| --- | --- | --- |
+| `tiny` (default) | `mlx-community/Qwen3-4B-4bit` | Fits any Apple Silicon Mac |
+| `small` | `mlx-community/Qwen3-8B-4bit` | 16 GB+ |
+| `medium` | `mlx-community/Qwen3-30B-A3B-4bit` | Best agent; about 3B active parameters per token, 32 GB+ |
+| `large` | `mlx-community/Llama-3.3-70B-Instruct-4bit` | 64 GB+ |
 
-Stopping speech fades the output to silence. Its popup closes automatically one
-second after speech finishes or F3 is pressed; Enter or Esc can dismiss it sooner.
+Any MLX model ID from Hugging Face or a local model folder also works. Agent mode
+needs a model whose chat template supports tool calls. Other models fall back to
+plain chat. `mlx-chat doctor` recommends the largest shortcut that fits your memory.
 
-With the `web` extra installed, `/web QUERY` sends an explicit search query to a
-search provider and gives the model the returned snippets. Normal chat does not
-perform web searches.
+## Privacy
 
-[Voice details](docs/REFERENCE.md#voice-input-and-speech-output) include microphone
-permissions, silence detection, playback controls, and startup preloading.
+Inference runs on a local server bound to `127.0.0.1`. The network is used only for
+model downloads and for web tools you approve. Settings, sessions, and logs are stored
+in `~/Library/Application Support/mlx-chat/`; set `MLX_CHAT_HOME` to change that.
+See [SECURITY.md](SECURITY.md) for the trust model of the agent tools.
 
-## Local server
-
-```sh
-mlx-chat serve small
-mlx-chat status
-mlx-chat logs --lines 100
-mlx-chat stop
-```
-
-The default endpoint is `http://127.0.0.1:8080/v1`. `--attach` requires an existing
-healthy server and prevents the app from starting one. External servers are
-reused without taking over their lifecycle.
-
-See [server lifecycle](docs/REFERENCE.md#server-lifecycle) for model switching,
-ownership checks, ports, timeouts, and network binding.
-
-## Data and privacy
-
-Settings, profiles, saved sessions, history, exports, and logs normally live in:
-
-```text
-~/Library/Application Support/mlx-chat/
-```
-
-`MLX_CHAT_HOME` changes that location. Keep it outside the source checkout.
-Model downloads use the Hugging Face cache.
-
-Inference and audio processing use the local server by default. Downloads and
-explicit `/web` searches require network access. Saved files are not encrypted;
-sessions with attachments include the selected file contents. A server bound to
-a network interface exposes the API to that network without authentication.
-
-Read the [privacy reference](docs/REFERENCE.md#storage-and-network-access) and
-[security policy](SECURITY.md) before sharing sessions or exposing an endpoint.
-
-## Documentation and development
+## Documentation
 
 - [Command and configuration reference](docs/REFERENCE.md)
 - [Troubleshooting](docs/REFERENCE.md#troubleshooting)
-- [Contributing](CONTRIBUTING.md)
-- [Source layout](src/README.md)
-- [Test suite](tests/README.md)
-
-The tests cover application behavior, local HTTP streaming, process ownership,
-CLI output, installation, and package imports. They do not run model inference
-or use audio hardware. CI checks text-only and optional-feature installations.
-
-The [recorded demo](assets/demo-muted.mp4) shows an earlier interface. Demo media
-stays in the repository and is excluded from package archives.
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md) · [Source layout](src/README.md) · [Tests](tests/README.md)
 
 ## License
 
-[MIT](LICENSE). Models and dependencies retain their own licenses.
+[MIT](LICENSE). Model weights and dependencies keep their own licenses.

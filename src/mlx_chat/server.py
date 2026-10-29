@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from .config import Settings, _atomic_json_write, app_home
 from .errors import MlxChatError, ServerUnavailableError
+from .hardware import memory_gib, tuned_server_args
 
 
 @dataclass
@@ -525,6 +526,8 @@ class ServerManager:
             ]
         )
         command.extend(self.settings.server_args or [])
+        # Not recorded in server_args, so reuse still matches the person's own options.
+        command.extend(tuned_server_args(list(self.settings.server_args or []), memory_gib()))
 
         log_dir = app_home() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)

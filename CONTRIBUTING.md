@@ -57,6 +57,13 @@ handling, transcription, playback, and stop-key checks on real devices. Record
 which model/chip/platform was used; do not turn one measurement into a general
 performance promise.
 
+## Releases
+
+Bump `version` in `pyproject.toml` and `__version__` in `src/mlx_chat/__init__.py`,
+run `uv lock`, add a section to [CHANGELOG.md](CHANGELOG.md), and tag `vX.Y.Z`.
+To re-record the README demo, run `vhs assets/demo.tape` in a project with a
+failing test and a cached model.
+
 ## Issues and security
 
 For bugs, include reproduction steps, expected/actual behavior, the commit,

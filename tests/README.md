@@ -28,6 +28,8 @@ uv run --no-sync pytest tests/test_server.py -k identity
 | Input and full-screen behavior | `test_ui.py`, `test_conversation.py` |
 | Context budgets and saved results | `test_context.py`, `test_sessions.py` |
 | File snapshots and generation profiles | `test_attachments.py`, `test_profiles.py` |
+| Agent loop, tool-call streaming, saved tool steps | `test_agent.py` |
+| Workspace tools, approvals, memory sizing | `test_tools.py` |
 | Search snippets | `test_web.py` |
 | Voice and speech cleanup/stop controls | `test_voice.py`, `test_tts.py` |
 | Process resource samples | `test_resources.py` |

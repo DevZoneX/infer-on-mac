@@ -1,33 +1,40 @@
 # Security
 
-Security fixes target the current `main` branch. This is a local inference tool,
-not an authenticated multi-user service.
+mlx-chat is a single-user local tool, not a multi-user service. Security fixes
+target the latest release on `main`.
 
-## Reporting
+## Reporting a vulnerability
 
-Use GitHub's private vulnerability reporting if it is enabled for this repository.
-If it is unavailable, open an issue requesting a private contact method without
-including exploit details, credentials, private prompts, or source files.
+Use GitHub's [private vulnerability reporting](https://github.com/DevZoneX/infer-on-mac/security/advisories/new).
+Do not open a public issue with exploit details. Include the version or commit,
+macOS and chip, installed extras, reproduction steps, and impact.
 
-Include the affected commit, platform, installation extras, reproduction steps,
-and the impact. Keep sensitive values out of public logs and screenshots.
+## Agent tools
+
+The agent acts with your user account's permissions inside the workspace folder.
+
+- **Confinement.** File tools resolve paths, including symlinks, and refuse
+  anything outside the workspace. `run_command` starts in the workspace but is a
+  normal shell. It can reach anything your account can, so approve commands with
+  the same care as running them yourself.
+- **Approvals.** `ask` confirms every edit, command, and web request. `edits`
+  applies file edits without asking. `all` skips every prompt. Use `all` only in a
+  folder you can restore, such as a clean git checkout. Non-interactive runs
+  decline anything that needs approval unless `--approve` allows it.
+- **Prompt injection.** File contents, command output, fetched pages, and search
+  results go to the model as data, but a model can still be steered by text it
+  reads. Review approval cards carefully when the agent has read untrusted content.
+- **Web tools.** `fetch_url` accepts only `http` and `https` URLs and always needs
+  approval, except in `all` mode.
 
 ## Operating boundaries
 
-- The default endpoint is loopback. `--allow-network` permits other hosts, but
-  the app does not add authentication or TLS. Do not expose it to the Internet.
-- Normal inference/audio processing is local. Model and phonemizer downloads,
-  search-provider requests, and explicitly selected remote endpoints use networks.
-- Sessions, history, profiles, exports, and logs are ordinary local files. They
-  are not encrypted. Sessions/JSON exports can include attached file excerpts.
-- Folder attachments skip hidden/generated entries but do not interpret
-  `.gitignore`. Inspect the selected list before sending private source context.
-- Attached text and search snippets are reference data. The app does not execute
-  their contents or automatically apply edits.
-- Extra MLX server arguments are passed to the selected backend. Review model
-  repository code and any options that permit remote code execution.
-- Shutdown controls only tracked instances and rechecks process identity. Do not
-  bypass those guards to stop an endpoint whose ownership cannot be established.
-
-Keep app data and model caches outside the source checkout. Review exported chats,
-logs, recordings, screenshots, and Git history before publishing them.
+- The server binds to `127.0.0.1`. `--allow-network` exposes it to other hosts
+  without authentication or TLS. Never expose it to the Internet.
+- Sessions, history, profiles, exports, and logs are unencrypted local files.
+  Sessions can contain attached files and tool output.
+- Folder attachments skip hidden and generated entries but do not read
+  `.gitignore`. Check the file list before sending private code.
+- Extra server arguments (`--mlx-arg`) are passed to MLX-LM unchanged. Review
+  options and model repositories that allow remote code execution.
+- Shutdown signals only processes whose identity matches a tracked instance.

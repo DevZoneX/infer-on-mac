@@ -2,6 +2,12 @@
 
 SLASH_COMMANDS = [
     "/help",
+    "/agent",
+    "/approve",
+    "/tools",
+    "/plan",
+    "/memory",
+    "/compact",
     "/web",
     "/attach",
     "/detach",

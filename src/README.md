@@ -11,7 +11,10 @@ CLI settings → server start/attach → chat controller → API stream → term
 | --- | --- |
 | `cli.py` | Argument parsing, configuration commands, one-off output, and startup coordination. |
 | `server.py` | Endpoint/registry locks, process identity, spawn/reuse, recovery, and shutdown. |
-| `client.py` | Request payloads, SSE parsing, reasoning separation, and generation results. |
+| `client.py` | Request payloads, SSE parsing, reasoning and tool-call separation, and generation results. |
+| `agent.py` | The tool-calling loop, approvals, plan mode, project memory, and step limit. |
+| `tools.py` | Workspace-confined file, search, outline, edit, command, plan, and web tools with their JSON schemas. |
+| `hardware.py` | Unified-memory model recommendation and the server's prompt-cache limit. |
 | `transport.py` | Bounded HTTP worker queue and cancellable reads. |
 | `chat.py` | Conversation state, slash commands, attachments, profiles, sessions, and model switches. |
 | `ui.py` | Prompt setup, key bindings, messages, help, and transcript restoration. |
