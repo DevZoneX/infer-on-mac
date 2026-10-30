@@ -3,17 +3,18 @@
 #   mlx-chat serve medium --port 8081        # load the model first so the take skips loading
 #   cd /path/to/a/project/with/a/failing/test # with pytest on PATH (e.g. a local .venv)
 #   git checkout . && git clean -fd           # reset between takes
-#   vhs /path/to/infer-on-mac/assets/demo.tape && mv demo.gif /path/to/infer-on-mac/assets/
+#   vhs /path/to/infer-on-mac/assets/demo.tape && mv demo.gif demo.mp4 /path/to/infer-on-mac/assets/
 # Recorded with Qwen3-30B-A3B-4bit on a project with todo.py, tests/test_todo.py,
 # AGENTS.md ("Run tests with `python -m pytest -q`") and a failing empty-title test.
 Output demo.gif
+Output demo.mp4
 Set Shell zsh
 Set FontFamily "JetBrains Mono"
-Set FontSize 15
-Set Width 1000
-Set Height 760
-Set Padding 18
-Set WindowBar Colorful
+Set FontSize 22
+Set Width 1920
+Set Height 1080
+Set Padding 28
+Set Framerate 24
 Set Theme { "background": "#0b0c10", "foreground": "#d4d7de", "cursor": "#a5b4fc", "selection": "#4b5578", "black": "#16181f", "brightBlack": "#8b93a3", "red": "#fca5a5", "brightRed": "#fca5a5", "green": "#86efac", "brightGreen": "#86efac", "yellow": "#fcd34d", "brightYellow": "#fcd34d", "blue": "#a5b4fc", "brightBlue": "#a5b4fc", "magenta": "#c084fc", "brightMagenta": "#c084fc", "cyan": "#22d3ee", "brightCyan": "#22d3ee", "white": "#d4d7de", "brightWhite": "#ffffff" }
 Set TypingSpeed 45ms
 
